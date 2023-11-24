@@ -1,0 +1,51 @@
+- name: "Battery"
+  unique_id: "inside_battery"
+  unit_of_measurement: "%"
+  state_topic: "chirp/3635363342317504/battery"
+  device_class: "battery"
+  value_template: "{{ value_json.value | round(2) }}"
+  device:
+    identifiers:
+      - "3635363342317504"
+    name: "Inside Water Level Sensor"
+    model: "TP-11"
+    manufacturer: "LarkAlert"
+
+- name: "Water Level"
+  unique_id: "inside_water_level"
+  unit_of_measurement: "m³"
+  state_topic: "chirp/3635363342317504/ma"
+  device_class: "volume_storage"
+  value_template: "{{ (((value_json.value - 4) / 3.2) * 3.14159) | round(2) }}"
+  device:
+    identifiers:
+      - "3635363342317504"
+    name: "Inside Water Level Sensor"
+    model: "TP-11"
+    manufacturer: "LarkAlert"
+
+- name: "ma value"
+  unique_id: "ma_value"
+  unit_of_measurement: "ma"
+  state_topic: "chirp/3635363342317504/ma"
+  device_class: "volume_storage"
+  value_template: "{{value_json.value }}"
+  device:
+    identifiers:
+      - "3635363342317504"
+    name: "Inside Water Level Sensor"
+    model: "TP-11"
+    manufacturer: "LarkAlert"
+
+- name: "Air Temp"
+  unique_id: "inside_air_temp"
+  unit_of_measurement: "°C"
+  state_topic: "chirp/3635363342317504/temp"
+  device_class: "temperature"
+  value_template: "{{ value_json.value | round(2) }}"
+  device:
+    identifiers:
+      - "3635363342317504"
+    name: "Inside Water Level Sensor"
+    model: "TP-11"
+    manufacturer: "LarkAlert"
