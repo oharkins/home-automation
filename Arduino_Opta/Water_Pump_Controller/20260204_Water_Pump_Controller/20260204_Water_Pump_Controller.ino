@@ -464,114 +464,57 @@ void onMqttMessage(int messageSize) {
 
 void sendHADiscovery() {
   Serial.println("Sending Home Assistant discovery configs...");
-
-  // Create device object (reused for all entities)
-  JSONVar device;
-  device["ids"][0] = deviceId;
-  device["name"] = deviceName;
-  device["mf"] = manufacturer;
-  device["mdl"] = model;
+  
+  // Increase MQTT buffer size for larger messages
+  mqttClient.setTxPayloadSize(512);
 
   // --- Pressure Sensor ---
-  JSONVar pressureConfig;
-  pressureConfig["name"] = "Water Pressure";
-  pressureConfig["uniq_id"] = String(deviceId) + "_pressure";
-  pressureConfig["stat_t"] = topicPressure;
-  pressureConfig["unit_of_meas"] = "PSI";
-  pressureConfig["dev_cla"] = "pressure";
-  pressureConfig["stat_cla"] = "measurement";
-  pressureConfig["icon"] = "mdi:gauge";
-  pressureConfig["avty_t"] = topicAvailability;
-  pressureConfig["pl_avail"] = "online";
-  pressureConfig["pl_not_avail"] = "offline";
-  pressureConfig["dev"] = device;
-
+  String pressureJson = "{\"name\":\"Water Pressure\",\"uniq_id\":\"opta_pump_pressure\",\"stat_t\":\"opta/pump/pressure\",\"unit_of_meas\":\"PSI\",\"dev_cla\":\"pressure\",\"stat_cla\":\"measurement\",\"icon\":\"mdi:gauge\",\"avty_t\":\"opta/pump/availability\",\"pl_avail\":\"online\",\"pl_not_avail\":\"offline\",\"dev\":{\"ids\":[\"opta_pump\"],\"name\":\"Water Pump Controller\",\"mf\":\"Arduino\",\"mdl\":\"Opta\"}}";
+  
   mqttClient.beginMessage("homeassistant/sensor/opta_pump_pressure/config", true, 1);
-  mqttClient.print(JSON.stringify(pressureConfig));
+  mqttClient.print(pressureJson);
   mqttClient.endMessage();
+  delay(100);  // Small delay between messages
 
   // --- Amps Sensor ---
-  JSONVar ampsConfig;
-  ampsConfig["name"] = "Pump Current";
-  ampsConfig["uniq_id"] = String(deviceId) + "_amps";
-  ampsConfig["stat_t"] = topicAmps;
-  ampsConfig["unit_of_meas"] = "A";
-  ampsConfig["dev_cla"] = "current";
-  ampsConfig["stat_cla"] = "measurement";
-  ampsConfig["icon"] = "mdi:current-ac";
-  ampsConfig["avty_t"] = topicAvailability;
-  ampsConfig["pl_avail"] = "online";
-  ampsConfig["pl_not_avail"] = "offline";
-  ampsConfig["dev"] = device;
-
+  String ampsJson = "{\"name\":\"Pump Current\",\"uniq_id\":\"opta_pump_amps\",\"stat_t\":\"opta/pump/amps\",\"unit_of_meas\":\"A\",\"dev_cla\":\"current\",\"stat_cla\":\"measurement\",\"icon\":\"mdi:current-ac\",\"avty_t\":\"opta/pump/availability\",\"pl_avail\":\"online\",\"pl_not_avail\":\"offline\",\"dev\":{\"ids\":[\"opta_pump\"],\"name\":\"Water Pump Controller\",\"mf\":\"Arduino\",\"mdl\":\"Opta\"}}";
+  
   mqttClient.beginMessage("homeassistant/sensor/opta_pump_amps/config", true, 1);
-  mqttClient.print(JSON.stringify(ampsConfig));
+  mqttClient.print(ampsJson);
   mqttClient.endMessage();
+  delay(100);
 
   // --- Pump Status Sensor (read-only) ---
-  JSONVar statusConfig;
-  statusConfig["name"] = "Water Pump Status";
-  statusConfig["uniq_id"] = String(deviceId) + "_status";
-  statusConfig["stat_t"] = topicStatus;
-  statusConfig["icon"] = "mdi:water-pump";
-  statusConfig["avty_t"] = topicAvailability;
-  statusConfig["pl_avail"] = "online";
-  statusConfig["pl_not_avail"] = "offline";
-  statusConfig["dev"] = device;
-
+  String statusJson = "{\"name\":\"Water Pump Status\",\"uniq_id\":\"opta_pump_status\",\"stat_t\":\"opta/pump/status\",\"icon\":\"mdi:water-pump\",\"avty_t\":\"opta/pump/availability\",\"pl_avail\":\"online\",\"pl_not_avail\":\"offline\",\"dev\":{\"ids\":[\"opta_pump\"],\"name\":\"Water Pump Controller\",\"mf\":\"Arduino\",\"mdl\":\"Opta\"}}";
+  
   mqttClient.beginMessage("homeassistant/binary_sensor/opta_pump_status/config", true, 1);
-  mqttClient.print(JSON.stringify(statusConfig));
+  mqttClient.print(statusJson);
   mqttClient.endMessage();
+  delay(100);
 
   // --- Fault Status Sensor ---
-  JSONVar faultConfig;
-  faultConfig["name"] = "Pump Fault";
-  faultConfig["uniq_id"] = String(deviceId) + "_fault";
-  faultConfig["stat_t"] = topicFault;
-  faultConfig["icon"] = "mdi:alert-circle";
-  faultConfig["avty_t"] = topicAvailability;
-  faultConfig["pl_avail"] = "online";
-  faultConfig["pl_not_avail"] = "offline";
-  faultConfig["dev"] = device;
-
+  String faultJson = "{\"name\":\"Pump Fault\",\"uniq_id\":\"opta_pump_fault\",\"stat_t\":\"opta/pump/fault\",\"icon\":\"mdi:alert-circle\",\"avty_t\":\"opta/pump/availability\",\"pl_avail\":\"online\",\"pl_not_avail\":\"offline\",\"dev\":{\"ids\":[\"opta_pump\"],\"name\":\"Water Pump Controller\",\"mf\":\"Arduino\",\"mdl\":\"Opta\"}}";
+  
   mqttClient.beginMessage("homeassistant/sensor/opta_pump_fault/config", true, 1);
-  mqttClient.print(JSON.stringify(faultConfig));
+  mqttClient.print(faultJson);
   mqttClient.endMessage();
+  delay(100);
 
   // --- Reset Button (as a button entity in HA) ---
-  JSONVar resetConfig;
-  resetConfig["name"] = "Pump Reset";
-  resetConfig["uniq_id"] = String(deviceId) + "_reset";
-  resetConfig["cmd_t"] = topicReset;
-  resetConfig["pl_prs"] = "RESET";
-  resetConfig["icon"] = "mdi:restart";
-  resetConfig["avty_t"] = topicAvailability;
-  resetConfig["pl_avail"] = "online";
-  resetConfig["pl_not_avail"] = "offline";
-  resetConfig["dev"] = device;
-
+  String resetJson = "{\"name\":\"Pump Reset\",\"uniq_id\":\"opta_pump_reset\",\"cmd_t\":\"opta/pump/reset\",\"pl_prs\":\"RESET\",\"icon\":\"mdi:restart\",\"avty_t\":\"opta/pump/availability\",\"pl_avail\":\"online\",\"pl_not_avail\":\"offline\",\"dev\":{\"ids\":[\"opta_pump\"],\"name\":\"Water Pump Controller\",\"mf\":\"Arduino\",\"mdl\":\"Opta\"}}";
+  
   mqttClient.beginMessage("homeassistant/button/opta_pump_reset/config", true, 1);
-  mqttClient.print(JSON.stringify(resetConfig));
+  mqttClient.print(resetJson);
   mqttClient.endMessage();
+  delay(100);
 
   // --- Mode Select (OFF/ON/AUTO) ---
-  JSONVar modeConfig;
-  modeConfig["name"] = "Pump Mode";
-  modeConfig["uniq_id"] = String(deviceId) + "_mode";
-  modeConfig["stat_t"] = topicMode;
-  modeConfig["cmd_t"] = topicModeCommand;
-  modeConfig["options"][0] = "OFF";
-  modeConfig["options"][1] = "ON";
-  modeConfig["options"][2] = "AUTO";
-  modeConfig["icon"] = "mdi:toggle-switch";
-  modeConfig["avty_t"] = topicAvailability;
-  modeConfig["pl_avail"] = "online";
-  modeConfig["pl_not_avail"] = "offline";
-  modeConfig["dev"] = device;
-
+  String modeJson = "{\"name\":\"Pump Mode\",\"uniq_id\":\"opta_pump_mode\",\"stat_t\":\"opta/pump/mode\",\"cmd_t\":\"opta/pump/mode/set\",\"options\":[\"OFF\",\"ON\",\"AUTO\"],\"icon\":\"mdi:toggle-switch\",\"avty_t\":\"opta/pump/availability\",\"pl_avail\":\"online\",\"pl_not_avail\":\"offline\",\"dev\":{\"ids\":[\"opta_pump\"],\"name\":\"Water Pump Controller\",\"mf\":\"Arduino\",\"mdl\":\"Opta\"}}";
+  
   mqttClient.beginMessage("homeassistant/select/opta_pump_mode/config", true, 1);
-  mqttClient.print(JSON.stringify(modeConfig));
+  mqttClient.print(modeJson);
   mqttClient.endMessage();
+  delay(100);
 
   Serial.println("Home Assistant discovery complete!");
 }
