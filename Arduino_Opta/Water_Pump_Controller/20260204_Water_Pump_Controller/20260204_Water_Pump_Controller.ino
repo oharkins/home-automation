@@ -118,10 +118,10 @@
 // ============== CONFIGURATION ==============
 
 // Network Settings
-byte mac[] = { 0xA8, 0x61, 0x0A, 0x50, 0xA6, 0xB7 };
-IPAddress ip(10, 58, 82, 99);
-IPAddress gateway(10, 58, 82, 1);
-IPAddress subnet(255, 255, 255, 0);
+const byte mac[] = { 0xA8, 0x61, 0x0A, 0x50, 0xA6, 0xB7 };
+const IPAddress ip(10, 58, 82, 99);
+const IPAddress gateway(10, 58, 82, 1);
+const IPAddress subnet(255, 255, 255, 0);
 
 // MQTT Settings
 const char* mqttBroker = "10.58.82.15";
@@ -159,13 +159,13 @@ const float UNDERCURRENT_THRESHOLD = 3.0;     // Amps - fault if below this when
 const unsigned long UNDERCURRENT_DELAY = 6000; // ms - must be below for this duration
 const unsigned long OVERCURRENT_DELAY = 6000; // ms - must exceed for this duration
 
-// Timing
+// Timing (all const for optimization)
 const unsigned long PUBLISH_INTERVAL = 1000;
 const unsigned long RECONNECT_INTERVAL = 5000;
 const unsigned long DEBOUNCE_DELAY = 50;
 const unsigned long ETH_CHECK_INTERVAL = 1000;
-const int MQTT_CONNECT_TIMEOUT = 2000;  // ms - non-blocking timeout
-const unsigned long PRESSURE_GRACE_PERIOD = 6000;  // ms - ignore low pressure after reset
+const unsigned long MQTT_CONNECT_TIMEOUT = 2000;
+const unsigned long PRESSURE_GRACE_PERIOD = 6000;
 
 // ============== PIN DEFINITIONS ==============
 
@@ -356,23 +356,22 @@ void initEthernet() {
 }
 
 void checkEthernet() {
-  unsigned long now = millis();
+  const unsigned long now = millis();
   if (now - lastEthCheck < ETH_CHECK_INTERVAL) return;
   lastEthCheck = now;
 
-  // Check if we have a valid IP (link is up)
-  bool linkUp = (Ethernet.linkStatus() == LinkON);
+  const bool linkUp = (Ethernet.linkStatus() == LinkON);
 
-  if (linkUp && !ethConnected) {
-    ethConnected = true;
-    Serial.print("Ethernet connected. IP: ");
-    Serial.println(Ethernet.localIP());
-  } else if (!linkUp && ethConnected) {
-    ethConnected = false;
-    Serial.println("Ethernet disconnected!");
+  if (linkUp != ethConnected) {
+    ethConnected = linkUp;
+    if (linkUp) {
+      Serial.print("Ethernet connected. IP: ");
+      Serial.println(Ethernet.localIP());
+    } else {
+      Serial.println("Ethernet disconnected!");
+    }
   }
 
-  // Maintain Ethernet stack
   Ethernet.maintain();
 }
 
@@ -511,35 +510,31 @@ void sendHADiscovery() {
 // ============== SENSOR READING ==============
 
 void readSensors() {
-  int rawPressure = analogRead(PRESSURE_PIN);
-  int rawAmps = analogRead(AMP_PIN);
+  const int rawPressure = analogRead(PRESSURE_PIN);
+  const int rawAmps = analogRead(AMP_PIN);
 
-  float voltagePressure = (rawPressure / 4095.0) * 10.0;
-  float voltageAmps = (rawAmps / 4095.0) * 10.0;
+  const float voltagePressure = (rawPressure * 10.0) / 4095.0;
+  const float voltageAmps = (rawAmps * 10.0) / 4095.0;
 
-  currentPressure = mapFloat(voltagePressure, 0.0, 10.0, PRESSURE_MIN, PRESSURE_MAX);
-  currentAmps = mapFloat(voltageAmps, 0.0, 10.0, AMP_MIN, AMP_MAX);
-
-  currentPressure = constrain(currentPressure, PRESSURE_MIN, PRESSURE_MAX);
-  currentAmps = constrain(currentAmps, AMP_MIN, AMP_MAX);
+  currentPressure = constrain(mapFloat(voltagePressure, 0.0, 10.0, PRESSURE_MIN, PRESSURE_MAX), PRESSURE_MIN, PRESSURE_MAX);
+  currentAmps = constrain(mapFloat(voltageAmps, 0.0, 10.0, AMP_MIN, AMP_MAX), AMP_MIN, AMP_MAX);
 }
 
-float mapFloat(float x, float inMin, float inMax, float outMin, float outMax) {
+inline float mapFloat(float x, float inMin, float inMax, float outMin, float outMax) {
   return (x - inMin) * (outMax - outMin) / (inMax - inMin) + outMin;
 }
 
 // ============== RESET BUTTON ==============
 
 void checkResetButton() {
-  unsigned long now = millis();
+  const unsigned long now = millis();
   if (now - lastButtonRead < DEBOUNCE_DELAY) return;
   lastButtonRead = now;
 
-  // Read USER button (active HIGH when pressed on Opta)
-  bool buttonState = digitalRead(BTN_USER);
+  const bool buttonState = digitalRead(BTN_USER);
 
   // Detect rising edge (button press)
-  if (lastButtonState == LOW && buttonState == HIGH) {
+  if (!lastButtonState && buttonState) {
     Serial.println("USER button pressed - resetting fault");
     resetFault();
   }
@@ -550,32 +545,24 @@ void checkResetButton() {
 // ============== MODE SELECTOR ==============
 
 void checkModeSelector() {
-  unsigned long now = millis();
+  const unsigned long now = millis();
   if (now - lastModeRead < DEBOUNCE_DELAY) return;
   lastModeRead = now;
 
-  // Read mode selector pins (active LOW with external pull-ups)
-  bool pinA = digitalRead(MODE_SELECT_A);
-  bool pinB = digitalRead(MODE_SELECT_B);
+  const bool pinA = digitalRead(MODE_SELECT_A);
+  const bool pinB = digitalRead(MODE_SELECT_B);
 
-  // Determine mode from truth table
+  // Determine mode from truth table using bit pattern
   OperationMode newMode;
+  const uint8_t pattern = (pinA << 1) | pinB;
   
-  if (pinA == HIGH && pinB == HIGH) {
-    // 11 = OFF mode
-    newMode = MODE_OFF;
-  } else if (pinA == LOW && pinB == HIGH) {
-    // 01 = ON mode (manual/priming)
-    newMode = MODE_ON;
-  } else if (pinA == HIGH && pinB == LOW) {
-    // 10 = AUTO mode
-    newMode = MODE_AUTO;
-  } else {
-    // 00 = Reserved/unused, default to OFF for safety
-    newMode = MODE_OFF;
+  switch (pattern) {
+    case 0b11: newMode = MODE_OFF; break;   // Both HIGH
+    case 0b01: newMode = MODE_ON; break;    // A LOW, B HIGH
+    case 0b10: newMode = MODE_AUTO; break;  // A HIGH, B LOW
+    default:   newMode = MODE_OFF; break;   // Reserved (both LOW)
   }
 
-  // Only change mode if different
   if (newMode != operationMode) {
     setOperationMode(newMode);
   }
@@ -615,112 +602,86 @@ const char* getModeString(OperationMode mode) {
 // ============== FAULT HANDLING ==============
 
 void checkFaults() {
-  // No fault checking in OFF mode
-  if (operationMode == MODE_OFF) return;
-  
-  // Skip if already faulted
-  if (faultState != FAULT_NONE) return;
+  if (operationMode == MODE_OFF || faultState != FAULT_NONE) return;
+
+  const unsigned long now = millis();
 
   // === ON MODE (Manual/Priming) ===
   if (operationMode == MODE_ON) {
-    // Check HIGH PRESSURE CUTOUT - stop pump if pressure too high
+    // High pressure cutout (not a fault)
     if (pumpState && currentPressure >= HIGH_PRESSURE_CUTOUT) {
       pumpState = false;
       digitalWrite(PUMP_RELAY, LOW);
-      Serial.print("High pressure cutout: ");
+      Serial.print(F("High pressure cutout: "));
       Serial.print(currentPressure);
-      Serial.println(" PSI");
+      Serial.println(F(" PSI"));
       publishPumpStatus();
-      // Not a fault - just a cutout, pump can restart when pressure drops
       return;
     }
     
-    // Check OVERCURRENT only
+    // Overcurrent check
     if (currentAmps > OVERCURRENT_THRESHOLD) {
       if (!overcurrentTiming) {
         overcurrentTiming = true;
-        overcurrentStartTime = millis();
-        Serial.println("Overcurrent detected, starting 6s timer...");
-      } else {
-        if (millis() - overcurrentStartTime >= OVERCURRENT_DELAY) {
-          triggerFault(FAULT_OVERCURRENT);
-          return;
-        }
+        overcurrentStartTime = now;
+        Serial.println(F("Overcurrent detected, starting timer..."));
+      } else if (now - overcurrentStartTime >= OVERCURRENT_DELAY) {
+        triggerFault(FAULT_OVERCURRENT);
+        return;
       }
-    } else {
-      if (overcurrentTiming) {
-        Serial.println("Current normalized, overcurrent timer reset");
-        overcurrentTiming = false;
-      }
+    } else if (overcurrentTiming) {
+      Serial.println(F("Current normalized, timer reset"));
+      overcurrentTiming = false;
     }
     
-    // Ignore undercurrent in ON mode
-    if (undercurrentTiming) {
-      Serial.println("Undercurrent check disabled in ON mode");
-      undercurrentTiming = false;
-    }
-    
-    return;  // Skip AUTO mode checks
+    if (undercurrentTiming) undercurrentTiming = false;
+    return;
   }
 
   // === AUTO MODE (Full fault protection) ===
   
-  // LOW PRESSURE: Only check in AUTO mode when pump is running
-  // Skip check during grace period after reset
-  bool inGracePeriod = (pressureGraceEndTime > 0 && millis() < pressureGraceEndTime);
+  // Low pressure check with grace period
+  const bool inGracePeriod = (pressureGraceEndTime > 0 && now < pressureGraceEndTime);
   
-  if (inGracePeriod && pumpState) {
-    // Still in grace period - don't check low pressure
-    // (Optional: could add a serial message here for debugging)
-  } else {
-    // Grace period expired or not active
-    if (pressureGraceEndTime > 0 && millis() >= pressureGraceEndTime) {
-      Serial.println("Pressure grace period ended");
-      pressureGraceEndTime = 0;  // Clear grace period flag
+  if (!inGracePeriod) {
+    if (pressureGraceEndTime > 0) {
+      Serial.println(F("Pressure grace period ended"));
+      pressureGraceEndTime = 0;
     }
     
-    // Normal low pressure check
     if (pumpState && currentPressure < LOW_PRESSURE_THRESHOLD) {
       triggerFault(FAULT_LOW_PRESSURE);
       return;
     }
   }
 
-  // OVERCURRENT: Must exceed threshold for OVERCURRENT_DELAY duration
+  // Overcurrent check
   if (currentAmps > OVERCURRENT_THRESHOLD) {
     if (!overcurrentTiming) {
       overcurrentTiming = true;
-      overcurrentStartTime = millis();
-      Serial.println("Overcurrent detected, starting 6s timer...");
-    } else {
-      if (millis() - overcurrentStartTime >= OVERCURRENT_DELAY) {
-        triggerFault(FAULT_OVERCURRENT);
-        return;
-      }
+      overcurrentStartTime = now;
+      Serial.println(F("Overcurrent detected, starting timer..."));
+    } else if (now - overcurrentStartTime >= OVERCURRENT_DELAY) {
+      triggerFault(FAULT_OVERCURRENT);
+      return;
     }
-  } else {
-    if (overcurrentTiming) {
-      Serial.println("Current normalized, overcurrent timer reset");
-      overcurrentTiming = false;
-    }
+  } else if (overcurrentTiming) {
+    Serial.println(F("Current normalized, timer reset"));
+    overcurrentTiming = false;
   }
 
-  // UNDERCURRENT: Only check in AUTO mode when pump is running
+  // Undercurrent check
   if (pumpState && currentAmps <= UNDERCURRENT_THRESHOLD) {
     if (!undercurrentTiming) {
       undercurrentTiming = true;
-      undercurrentStartTime = millis();
-      Serial.println("Undercurrent detected, starting 6s timer...");
-    } else {
-      if (millis() - undercurrentStartTime >= UNDERCURRENT_DELAY) {
-        triggerFault(FAULT_UNDERCURRENT);
-      }
+      undercurrentStartTime = now;
+      Serial.println(F("Undercurrent detected, starting timer..."));
+    } else if (now - undercurrentStartTime >= UNDERCURRENT_DELAY) {
+      triggerFault(FAULT_UNDERCURRENT);
     }
-  } else {
-    if (undercurrentTiming) {
-      Serial.println("Current normalized, undercurrent timer reset");
-      undercurrentTiming = false;
-    }
+  } else if (undercurrentTiming) {
+    Serial.println(F("Current normalized, timer reset"));
+    undercurrentTiming = false;
   }
 }
 
@@ -768,12 +729,12 @@ const char* getFaultString(FaultState fault) {
 }
 
 void updateStatusLEDs() {
-  // Light up the appropriate LED based on fault state
-  // Turn off all LEDs first, then turn on the correct one
-  digitalWrite(LED_LOW_PRESSURE, (faultState == FAULT_LOW_PRESSURE) ? HIGH : LOW);
-  digitalWrite(LED_OVERCURRENT, (faultState == FAULT_OVERCURRENT) ? HIGH : LOW);
-  digitalWrite(LED_UNDERCURRENT, (faultState == FAULT_UNDERCURRENT) ? HIGH : LOW);
-  digitalWrite(LED_SYSTEM_OK, (faultState == FAULT_NONE) ? HIGH : LOW);
+  // Efficiently update LEDs based on fault state
+  const bool isOK = (faultState == FAULT_NONE);
+  digitalWrite(LED_LOW_PRESSURE, faultState == FAULT_LOW_PRESSURE);
+  digitalWrite(LED_OVERCURRENT, faultState == FAULT_OVERCURRENT);
+  digitalWrite(LED_UNDERCURRENT, faultState == FAULT_UNDERCURRENT);
+  digitalWrite(LED_SYSTEM_OK, isOK);
 }
 
 // ============== PUMP CONTROL ==============
@@ -813,18 +774,18 @@ void updatePumpOutput() {
 
 void publishData() {
   // Always print status to serial (local monitoring)
-  Serial.print("P: ");
+  Serial.print(F("P: "));
   Serial.print(currentPressure, 1);
-  Serial.print(" PSI | A: ");
+  Serial.print(F(" PSI | A: "));
   Serial.print(currentAmps, 2);
-  Serial.print(" | Mode: ");
+  Serial.print(F(" | Mode: "));
   Serial.print(getModeString(operationMode));
-  Serial.print(" | Pump: ");
-  Serial.print(pumpState ? "ON" : "OFF");
-  Serial.print(" | Fault: ");
+  Serial.print(F(" | Pump: "));
+  Serial.print(pumpState ? F("ON") : F("OFF"));
+  Serial.print(F(" | Fault: "));
   Serial.print(getFaultString(faultState));
-  Serial.print(" | Net: ");
-  Serial.println(ethConnected ? (mqttClient.connected() ? "MQTT" : "ETH") : "DOWN");
+  Serial.print(F(" | Net: "));
+  Serial.println(ethConnected ? (mqttClient.connected() ? F("MQTT") : F("ETH")) : F("DOWN"));
 
   // Only publish to MQTT if connected
   if (!mqttClient.connected()) return;
