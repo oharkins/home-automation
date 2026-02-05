@@ -23,8 +23,12 @@
  * ==============================
  * 
  * RESET BUTTON:
- * - Use the built-in USER button on the Opta (BTN_USER)
- * - Press to clear any fault condition
+ * - Built-in USER button on the Opta (BTN_USER) - internal pull-up
+ * - External reset button on I6 (A5) - REQUIRES EXTERNAL 10K PULL-UP RESISTOR
+ *   - Connect 10K resistor from I6 to +V (use +24V, +5V, or +3.3V available on Opta)
+ *   - Connect button between I6 and GND
+ *   - Button press pulls pin LOW to trigger reset
+ * - Either button press will clear any fault condition
  * 
  * MODE SELECTOR (I7 / A6 and I8 / A7):
  * - REQUIRES EXTERNAL 10K PULL-UP RESISTORS (Opta analog inputs don't support internal pull-ups)
@@ -174,6 +178,7 @@ const unsigned long PRESSURE_GRACE_PERIOD = 6000;
 #define AMP_PIN      A1      // I2 - Current sensor 0-10V
 
 // Digital Inputs
+#define RESET_BUTTON     A5  // I6 - External reset button (REQUIRES EXTERNAL 10K PULL-UP to +3.3V or +5V)
 #define MODE_SELECT_A    A6  // I7 - Mode selector bit 0 (REQUIRES EXTERNAL 10K PULL-UP to +3.3V or +5V)
 #define MODE_SELECT_B    A7  // I8 - Mode selector bit 1 (REQUIRES EXTERNAL 10K PULL-UP to +3.3V or +5V)
 
@@ -236,9 +241,11 @@ unsigned long pressureGraceEndTime = 0;  // Time when pressure grace period ends
 unsigned long lastPublish = 0;
 unsigned long lastReconnect = 0;
 unsigned long lastButtonRead = 0;
+unsigned long lastResetButtonRead = 0;
 unsigned long lastModeRead = 0;
 unsigned long lastEthCheck = 0;
 bool lastButtonState = LOW;
+bool lastResetButtonState = HIGH;  // External button is pulled HIGH, pressed = LOW
 bool ethConnected = false;
 bool mqttConfigured = false;
 
@@ -269,6 +276,7 @@ void setup() {
 
   // Initialize button inputs
   pinMode(BTN_USER, INPUT);                 // Built-in USER button
+  pinMode(RESET_BUTTON, INPUT);             // I6 - external pull-up required
   pinMode(MODE_SELECT_A, INPUT);            // I7 - external pull-up required
   pinMode(MODE_SELECT_B, INPUT);            // I8 - external pull-up required
 
@@ -312,8 +320,9 @@ void loop() {
   // Check for mode selector changes
   checkModeSelector();
 
-  // Check for reset button press
+  // Check for reset button press (both built-in and external)
   checkResetButton();
+  checkExternalResetButton();
 
   // Check for fault conditions
   checkFaults();
@@ -540,6 +549,22 @@ void checkResetButton() {
   }
 
   lastButtonState = buttonState;
+}
+
+void checkExternalResetButton() {
+  const unsigned long now = millis();
+  if (now - lastResetButtonRead < DEBOUNCE_DELAY) return;
+  lastResetButtonRead = now;
+
+  const bool buttonState = digitalRead(RESET_BUTTON);
+
+  // Detect falling edge (button press pulls LOW)
+  if (lastResetButtonState && !buttonState) {
+    Serial.println("External RESET button pressed - resetting fault");
+    resetFault();
+  }
+
+  lastResetButtonState = buttonState;
 }
 
 // ============== MODE SELECTOR ==============
