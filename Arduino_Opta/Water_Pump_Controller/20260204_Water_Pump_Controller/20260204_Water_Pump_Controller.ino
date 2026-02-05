@@ -22,10 +22,8 @@
  * - OVERCURRENT:   Faults if amps > 10A for more than 6 seconds
  * - UNDERCURRENT:  Faults if amps <= 3A for more than 6 seconds while running
  * - Reset via physical button on I3 (A2) or MQTT reset command
- * - MODE SWITCH on I4 (A3) & I5 (A4): 3-position switch (OFF/AUTO/ON)
- *   OFF: Pump forced off, AUTO: Normal operation with fault protection, ON: Pump forced on (bypasses low pressure & undercurrent)
- *   (Overcurrent still protected for safety in all modes)
- *   Switch wiring: Common to GND, positions to I4 & I5 with internal pull-ups
+ * - JOG/BYPASS on I4 (A3): Hold to run pump, bypasses low pressure & undercurrent
+ *   (Overcurrent still protected for safety)
  *
  * MQTT Topics:
  *   Publish:
@@ -113,7 +111,7 @@ const unsigned long PUBLISH_INTERVAL = 2000;
 const unsigned long RECONNECT_INTERVAL = 5000;
 const unsigned long DEBOUNCE_DELAY = 50;
 const unsigned long ETH_CHECK_INTERVAL = 1000;
-const int MQTT_CONNECT_TIMEOUT = 5000;  // ms - non-blocking timeout
+const int MQTT_CONNECT_TIMEOUT = 2000;  // ms - non-blocking timeout
 
 // ============== PIN DEFINITIONS ==============
 
@@ -123,9 +121,7 @@ const int MQTT_CONNECT_TIMEOUT = 5000;  // ms - non-blocking timeout
 
 // Digital Inputs
 #define RESET_BUTTON_PIN A2  // I3 - Reset button (active LOW with internal pull-up)
-#define MODE_SWITCH_A    A3  // I4 - Mode switch position A (3-position switch)
-#define MODE_SWITCH_B    A4  // I5 - Mode switch position B (3-position switch)
-                             // Switch encoding: A=LOW,B=LOW=OFF | A=HIGH,B=LOW=AUTO | A=LOW,B=HIGH=ON
+#define JOG_BUTTON_PIN   A3  // I4 - Jog/Bypass button (hold to run pump, bypasses low pressure)
 
 // Relay Outputs
 #define PUMP_RELAY  D0       // Relay 1 - Pump control
@@ -144,14 +140,6 @@ enum FaultState {
   FAULT_LOW_PRESSURE,
   FAULT_OVERCURRENT,
   FAULT_UNDERCURRENT
-};
-
-// ============== JOG/BYPASS MODES ==============
-
-enum JogMode {
-  JOG_OFF,   // Pump forced off (both switches LOW)
-  JOG_AUTO,  // Normal operation with fault protection (A=HIGH, B=LOW)
-  JOG_ON     // Pump forced on, bypasses low pressure & undercurrent (A=LOW, B=HIGH)
 };
 
 // ============== GLOBAL VARIABLES ==============
@@ -173,13 +161,11 @@ bool undercurrentTiming = false;
 unsigned long lastPublish = 0;
 unsigned long lastReconnect = 0;
 unsigned long lastButtonRead = 0;
-unsigned long lastModeRead = 0;
 unsigned long lastEthCheck = 0;
 bool lastButtonState = HIGH;
 bool ethConnected = false;
 bool mqttConfigured = false;
-JogMode jogMode = JOG_AUTO;  // Start in AUTO mode (normal operation)
-JogMode lastJogMode = JOG_AUTO;
+bool jogMode = false;  // True when jog button is held - bypasses low pressure/undercurrent
 
 // ============== SETUP ==============
 
@@ -209,8 +195,7 @@ void setup() {
 
   // Initialize button inputs (active LOW with internal pull-up)
   pinMode(RESET_BUTTON_PIN, INPUT_PULLUP);
-  pinMode(MODE_SWITCH_A, INPUT_PULLUP);
-  pinMode(MODE_SWITCH_B, INPUT_PULLUP);
+  pinMode(JOG_BUTTON_PIN, INPUT_PULLUP);
 
   // Configure analog resolution
   analogReadResolution(12);
@@ -233,7 +218,6 @@ void setup() {
   Serial.print(" A for ");
   Serial.print(UNDERCURRENT_DELAY / 1000);
   Serial.println(" seconds");
-  Serial.println("Mode switch: 3-position (OFF/AUTO/ON)");
   Serial.println("Local control active - network connects in background.");
 }
 
@@ -248,8 +232,8 @@ void loop() {
   // Check for reset button press
   checkResetButton();
 
-  // Read mode switch position
-  checkModeSwitch();
+  // Check for jog button (bypass low pressure to prime pump)
+  checkJogButton();
 
   // Check for fault conditions (respects jog mode)
   checkFaults();
@@ -541,60 +525,27 @@ void checkResetButton() {
   lastButtonState = buttonState;
 }
 
-// ============== MODE SWITCH (3-POSITION: OFF/AUTO/ON) ==============
+// ============== JOG BUTTON (BYPASS LOW PRESSURE) ==============
 
-void checkModeSwitch() {
-  unsigned long now = millis();
-  if (now - lastModeRead < DEBOUNCE_DELAY) return;
-  lastModeRead = now;
+void checkJogButton() {
+  // Jog button is held = run pump bypassing low pressure & undercurrent faults
+  // Still protects against overcurrent for safety
+  bool jogPressed = (digitalRead(JOG_BUTTON_PIN) == LOW);
 
-  // Read switch positions (active LOW with pull-up)
-  bool switchA = digitalRead(MODE_SWITCH_A);
-  bool switchB = digitalRead(MODE_SWITCH_B);
-
-  // Decode switch position
-  // Both LOW = OFF
-  // A HIGH, B LOW = AUTO
-  // A LOW, B HIGH = ON
-  JogMode newMode;
-  
-  if (!switchA && !switchB) {
-    newMode = JOG_OFF;
-  } else if (switchA && !switchB) {
-    newMode = JOG_AUTO;
-  } else if (!switchA && switchB) {
-    newMode = JOG_ON;
-  } else {
-    // Both HIGH = invalid, default to AUTO
-    newMode = JOG_AUTO;
-  }
-
-  // Only act if mode changed
-  if (newMode != lastJogMode) {
-    jogMode = newMode;
-    lastJogMode = newMode;
-
-    switch (jogMode) {
-      case JOG_OFF:
-        pumpRequested = false;  // Force pump off
-        Serial.println("MODE SWITCH: OFF (forced off)");
-        break;
-      
-      case JOG_AUTO:
-        Serial.println("MODE SWITCH: AUTO (normal operation with fault protection)");
-        break;
-      
-      case JOG_ON:
-        pumpRequested = true;  // Force pump on
-        // Clear low pressure or undercurrent fault if present
-        if (faultState == FAULT_LOW_PRESSURE || faultState == FAULT_UNDERCURRENT) {
-          faultState = FAULT_NONE;
-          digitalWrite(FAULT_LIGHT, LOW);
-          updateStatusLEDs();
-        }
-        Serial.println("MODE SWITCH: ON (forced on, bypasses low pressure & undercurrent)");
-        break;
+  if (jogPressed && !jogMode) {
+    jogMode = true;
+    pumpRequested = true;  // Start pump while jogging
+    // Clear low pressure or undercurrent fault if present
+    if (faultState == FAULT_LOW_PRESSURE || faultState == FAULT_UNDERCURRENT) {
+      faultState = FAULT_NONE;
+      digitalWrite(FAULT_LIGHT, LOW);
+      updateStatusLEDs();
     }
+    Serial.println("JOG MODE: Pump running (low pressure bypass)");
+  } else if (!jogPressed && jogMode) {
+    jogMode = false;
+    pumpRequested = false;  // Stop pump when jog released
+    Serial.println("JOG MODE: Released - pump stopped");
     publishPumpStatus();
   }
 }
@@ -605,8 +556,8 @@ void checkFaults() {
   // Skip if already faulted
   if (faultState != FAULT_NONE) return;
 
-  // LOW PRESSURE: Only check when pump is running AND in AUTO mode
-  if (jogMode == JOG_AUTO && pumpState && currentPressure < LOW_PRESSURE_THRESHOLD) {
+  // LOW PRESSURE: Only check when pump is running AND not in jog mode
+  if (!jogMode && pumpState && currentPressure < LOW_PRESSURE_THRESHOLD) {
     triggerFault(FAULT_LOW_PRESSURE);
     return;
   }
@@ -630,8 +581,8 @@ void checkFaults() {
     }
   }
 
-  // UNDERCURRENT: Only check when pump is running AND in AUTO mode
-  if (jogMode == JOG_AUTO && pumpState && currentAmps <= UNDERCURRENT_THRESHOLD) {
+  // UNDERCURRENT: Only check when pump is running AND not in jog mode
+  if (!jogMode && pumpState && currentAmps <= UNDERCURRENT_THRESHOLD) {
     if (!undercurrentTiming) {
       undercurrentTiming = true;
       undercurrentStartTime = millis();
@@ -721,22 +672,7 @@ void updateStatusLEDs() {
 // ============== PUMP CONTROL ==============
 
 void updatePumpOutput() {
-  bool shouldRun = false;
-  
-  // Determine if pump should run based on jog mode
-  switch (jogMode) {
-    case JOG_OFF:
-      shouldRun = false;  // Forced off
-      break;
-    
-    case JOG_ON:
-      shouldRun = (faultState == FAULT_NONE);  // Forced on (unless overcurrent fault)
-      break;
-    
-    case JOG_AUTO:
-      shouldRun = (faultState == FAULT_NONE) && pumpRequested;  // Normal operation
-      break;
-  }
+  bool shouldRun = (faultState == FAULT_NONE) && pumpRequested;
 
   if (shouldRun != pumpState) {
     pumpState = shouldRun;
@@ -759,12 +695,7 @@ void publishData() {
   Serial.print(currentAmps, 2);
   Serial.print(" | Pump: ");
   Serial.print(pumpState ? "ON" : "OFF");
-  Serial.print(" | Mode: ");
-  switch (jogMode) {
-    case JOG_OFF:  Serial.print("OFF"); break;
-    case JOG_AUTO: Serial.print("AUTO"); break;
-    case JOG_ON:   Serial.print("ON"); break;
-  }
+  if (jogMode) Serial.print(" [JOG]");
   Serial.print(" | Fault: ");
   Serial.print(getFaultString(faultState));
   Serial.print(" | Net: ");
