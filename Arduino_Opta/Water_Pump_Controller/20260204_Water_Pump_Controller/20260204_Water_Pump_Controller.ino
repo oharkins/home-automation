@@ -17,10 +17,22 @@
  * - Home Assistant auto-discovery
  * - Non-blocking network: local control works even if network is down
  *
+ * Operation Modes:
+ * - OFF:  Pump is completely off, all fault checking disabled
+ * - ON:   Pump runs continuously (manual/priming mode)
+ *         - Ignores low pressure warnings (for priming)
+ *         - Respects HIGH PRESSURE CUTOUT (stops at 60 PSI, auto-restarts when pressure drops)
+ *         - Ignores undercurrent faults (for priming/variable loads)
+ *         - Still respects overcurrent protection
+ * - AUTO: Pump runs automatically with full fault protection
+ *         - All fault checks active (low pressure, overcurrent, undercurrent)
+ *         - Pump turns on automatically, stops only on fault
+ *
  * Fault Protection:
- * - LOW PRESSURE:  Faults if pressure < 30 PSI while pump is running
- * - OVERCURRENT:   Faults if amps > 10A for more than 6 seconds
- * - UNDERCURRENT:  Faults if amps <= 3A for more than 6 seconds while running
+ * - LOW PRESSURE:  Faults if pressure < 30 PSI while pump is running (AUTO mode only)
+ * - HIGH PRESSURE: Cutout at 60 PSI in ON mode (not a fault, auto-restarts)
+ * - OVERCURRENT:   Faults if amps > 10A for more than 6 seconds (ON and AUTO modes)
+ * - UNDERCURRENT:  Faults if amps <= 3A for more than 6 seconds while running (AUTO mode only)
  * - Reset via physical button on I3 (A2) or MQTT reset command
  *
  * MQTT Topics:
@@ -29,10 +41,11 @@
  *     opta/pump/amps         - Current draw in amps
  *     opta/pump/status       - "ON" or "OFF"
  *     opta/pump/fault        - "OK", "LOW_PRESSURE", "OVERCURRENT", or "UNDERCURRENT"
+ *     opta/pump/mode         - "OFF", "ON", or "AUTO"
  *     opta/pump/availability - "online" or "offline"
  *   Subscribe:
- *     opta/pump/command      - "ON" or "OFF" to control pump
  *     opta/pump/reset        - "RESET" to clear fault
+ *     opta/pump/mode/set     - "OFF", "ON", or "AUTO" to change operation mode
  */
 
 /*
@@ -56,11 +69,12 @@
 
 // ============== OPTA STATUS LED PINS ==============
 // The 4 green status LEDs on the Opta front panel
-// Using direct pin numbers that work across cores
-const int LED_STATUS_1 = 7;    // Status LED 1 (near relay 1)
-const int LED_STATUS_2 = 8;    // Status LED 2
-const int LED_STATUS_3 = 9;    // Status LED 3
-const int LED_STATUS_4 = 10;   // Status LED 4 (near relay 4)
+// These are predefined in the Opta core as LED_D0, LED_D1, LED_D2, LED_D3
+// Mapping to our application:
+// LED_D0 = Status LED 1 (Low Pressure fault indicator)
+// LED_D1 = Status LED 2 (Overcurrent fault indicator)
+// LED_D2 = Status LED 3 (Undercurrent fault indicator)
+// LED_D3 = Status LED 4 (System OK indicator)
 
 // ============== CONFIGURATION ==============
 
@@ -87,9 +101,10 @@ const char* topicPressure     = "opta/pump/pressure";
 const char* topicAmps         = "opta/pump/amps";
 const char* topicStatus       = "opta/pump/status";
 const char* topicFault        = "opta/pump/fault";
-const char* topicCommand      = "opta/pump/command";
 const char* topicReset        = "opta/pump/reset";
 const char* topicAvailability = "opta/pump/availability";
+const char* topicMode         = "opta/pump/mode";
+const char* topicModeCommand  = "opta/pump/mode/set";
 
 // Sensor Calibration
 const float PRESSURE_MAX = 87.0;
@@ -99,6 +114,7 @@ const float AMP_MIN = 0.0;
 
 // Fault Thresholds
 const float LOW_PRESSURE_THRESHOLD = 30.0;    // PSI - fault if below this
+const float HIGH_PRESSURE_CUTOUT = 60.0;      // PSI - cutout if above this (ON mode)
 const float OVERCURRENT_THRESHOLD = 10.0;     // Amps - fault if above this
 const float UNDERCURRENT_THRESHOLD = 3.0;     // Amps - fault if below this when running
 const unsigned long UNDERCURRENT_DELAY = 6000; // ms - must be below for this duration
@@ -119,16 +135,25 @@ const int MQTT_CONNECT_TIMEOUT = 2000;  // ms - non-blocking timeout
 
 // Digital Inputs
 #define RESET_BUTTON_PIN A2  // I3 - Reset button (active LOW with internal pull-up)
+#define MODE_SWITCH_PIN  A3  // I4 - Mode switch input (for physical toggle if needed)
 
 // Relay Outputs
 #define PUMP_RELAY  D0       // Relay 1 - Pump control
 #define FAULT_LIGHT D1       // Relay 2 - Fault indicator light
 
 // Status LEDs (front panel) - mapped to Opta status LEDs
-#define LED_LOW_PRESSURE  LED_STATUS_1   // LED 1 - Low pressure fault
-#define LED_OVERCURRENT   LED_STATUS_2   // LED 2 - Overcurrent fault
-#define LED_UNDERCURRENT  LED_STATUS_3   // LED 3 - Undercurrent fault
-#define LED_SYSTEM_OK     LED_STATUS_4   // LED 4 - System OK (no fault)
+#define LED_LOW_PRESSURE  LED_D0   // LED 1 - Low pressure fault
+#define LED_OVERCURRENT   LED_D1   // LED 2 - Overcurrent fault
+#define LED_UNDERCURRENT  LED_D2   // LED 3 - Undercurrent fault
+#define LED_SYSTEM_OK     LED_D3   // LED 4 - System OK (no fault)
+
+// ============== OPERATION MODES ==============
+
+enum OperationMode {
+  MODE_OFF,   // Pump off, all faults ignored
+  MODE_ON,    // Pump on (manual), ignores low pressure (for priming), respects current limits
+  MODE_AUTO   // Normal automatic operation with all fault protections
+};
 
 // ============== FAULT STATES ==============
 
@@ -144,8 +169,8 @@ enum FaultState {
 EthernetClient ethClient;
 MqttClient mqttClient(ethClient);
 
+OperationMode operationMode = MODE_AUTO;  // Default to AUTO mode
 bool pumpState = false;
-bool pumpRequested = false;  // User's desired pump state
 float currentPressure = 0.0;
 float currentAmps = 0.0;
 
@@ -180,7 +205,6 @@ void setup() {
   digitalWrite(PUMP_RELAY, LOW);
   digitalWrite(FAULT_LIGHT, LOW);
   pumpState = false;
-  pumpRequested = false;
 
   // Initialize status LEDs
   pinMode(LED_LOW_PRESSURE, OUTPUT);
@@ -191,6 +215,7 @@ void setup() {
 
   // Initialize button inputs (active LOW with internal pull-up)
   pinMode(RESET_BUTTON_PIN, INPUT_PULLUP);
+  pinMode(MODE_SWITCH_PIN, INPUT_PULLUP);  // Optional physical mode switch
 
   // Configure analog resolution
   analogReadResolution(12);
@@ -200,9 +225,14 @@ void setup() {
   initMQTT();
 
   Serial.println("System ready (non-blocking network).");
+  Serial.print("Operation mode: ");
+  Serial.println(getModeString(operationMode));
   Serial.print("Low pressure threshold: ");
   Serial.print(LOW_PRESSURE_THRESHOLD);
-  Serial.println(" PSI");
+  Serial.println(" PSI (AUTO mode only)");
+  Serial.print("High pressure cutout: ");
+  Serial.print(HIGH_PRESSURE_CUTOUT);
+  Serial.println(" PSI (ON mode)");
   Serial.print("Overcurrent threshold: ");
   Serial.print(OVERCURRENT_THRESHOLD);
   Serial.print(" A for ");
@@ -212,7 +242,7 @@ void setup() {
   Serial.print(UNDERCURRENT_THRESHOLD);
   Serial.print(" A for ");
   Serial.print(UNDERCURRENT_DELAY / 1000);
-  Serial.println(" seconds");
+  Serial.println(" seconds (AUTO mode only)");
   Serial.println("Local control active - network connects in background.");
 }
 
@@ -328,9 +358,9 @@ void reconnectMQTT() {
   mqttClient.endMessage();
 
   // Subscribe to topics
-  mqttClient.subscribe(topicCommand);
   mqttClient.subscribe(topicReset);
-  Serial.println("Subscribed to command and reset topics");
+  mqttClient.subscribe(topicModeCommand);
+  Serial.println("Subscribed to reset and mode topics");
 
   // Send Home Assistant discovery configs
   sendHADiscovery();
@@ -354,19 +384,16 @@ void onMqttMessage(int messageSize) {
   Serial.print("]: ");
   Serial.println(message);
 
-  // Handle pump commands
-  if (topic == topicCommand) {
-    if (faultState != FAULT_NONE) {
-      Serial.println("Command ignored - system faulted. Send RESET first.");
-      return;
+  // Handle mode change commands
+  if (topic == topicModeCommand) {
+    if (message == "OFF" || message == "0") {
+      setOperationMode(MODE_OFF);
+    } else if (message == "ON" || message == "1" || message == "MANUAL") {
+      setOperationMode(MODE_ON);
+    } else if (message == "AUTO" || message == "2" || message == "AUTOMATIC") {
+      setOperationMode(MODE_AUTO);
     }
-    if (message == "ON" || message == "1" || message == "START") {
-      pumpRequested = true;
-    } else if (message == "OFF" || message == "0" || message == "STOP") {
-      pumpRequested = false;
-    } else if (message == "TOGGLE") {
-      pumpRequested = !pumpRequested;
-    }
+    return;
   }
 
   // Handle reset command
@@ -427,23 +454,18 @@ void sendHADiscovery() {
   mqttClient.print(ampsConfig);
   mqttClient.endMessage();
 
-  // --- Pump Switch ---
-  String switchConfig = String("{") +
-    "\"name\":\"Water Pump\"," +
-    "\"uniq_id\":\"" + deviceId + "_switch\"," +
+  // --- Pump Status Sensor (read-only) ---
+  String statusConfig = String("{") +
+    "\"name\":\"Water Pump Status\"," +
+    "\"uniq_id\":\"" + deviceId + "_status\"," +
     "\"stat_t\":\"" + topicStatus + "\"," +
-    "\"cmd_t\":\"" + topicCommand + "\"," +
-    "\"pl_on\":\"ON\"," +
-    "\"pl_off\":\"OFF\"," +
-    "\"stat_on\":\"ON\"," +
-    "\"stat_off\":\"OFF\"," +
     "\"icon\":\"mdi:water-pump\"," +
     availabilityJson + "," +
     deviceJson +
     "}";
 
-  mqttClient.beginMessage("homeassistant/switch/opta_pump/config", true, 1);
-  mqttClient.print(switchConfig);
+  mqttClient.beginMessage("homeassistant/binary_sensor/opta_pump_status/config", true, 1);
+  mqttClient.print(statusConfig);
   mqttClient.endMessage();
 
   // --- Fault Status Sensor ---
@@ -473,6 +495,22 @@ void sendHADiscovery() {
 
   mqttClient.beginMessage("homeassistant/button/opta_pump_reset/config", true, 1);
   mqttClient.print(resetConfig);
+  mqttClient.endMessage();
+
+  // --- Mode Select (OFF/ON/AUTO) ---
+  String modeConfig = String("{") +
+    "\"name\":\"Pump Mode\"," +
+    "\"uniq_id\":\"" + deviceId + "_mode\"," +
+    "\"stat_t\":\"" + topicMode + "\"," +
+    "\"cmd_t\":\"" + topicModeCommand + "\"," +
+    "\"options\":[\"OFF\",\"ON\",\"AUTO\"]," +
+    "\"icon\":\"mdi:toggle-switch\"," +
+    availabilityJson + "," +
+    deviceJson +
+    "}";
+
+  mqttClient.beginMessage("homeassistant/select/opta_pump_mode/config", true, 1);
+  mqttClient.print(modeConfig);
   mqttClient.endMessage();
 
   Serial.println("Home Assistant discovery complete!");
@@ -517,13 +555,90 @@ void checkResetButton() {
   lastButtonState = buttonState;
 }
 
+// ============== OPERATION MODE CONTROL ==============
+
+void setOperationMode(OperationMode newMode) {
+  if (operationMode == newMode) return;
+  
+  operationMode = newMode;
+  Serial.print("Mode changed to: ");
+  Serial.println(getModeString(operationMode));
+  
+  // Clear fault when changing modes
+  if (faultState != FAULT_NONE) {
+    resetFault();
+  }
+  
+  // Update pump state based on new mode
+  updatePumpOutput();
+  
+  // Publish mode change
+  publishModeStatus();
+}
+
+const char* getModeString(OperationMode mode) {
+  switch (mode) {
+    case MODE_OFF:  return "OFF";
+    case MODE_ON:   return "ON";
+    case MODE_AUTO: return "AUTO";
+    default:        return "UNKNOWN";
+  }
+}
+
 // ============== FAULT HANDLING ==============
 
 void checkFaults() {
+  // No fault checking in OFF mode
+  if (operationMode == MODE_OFF) return;
+  
   // Skip if already faulted
   if (faultState != FAULT_NONE) return;
 
-  // LOW PRESSURE: Only check when pump is running
+  // === ON MODE (Manual/Priming) ===
+  if (operationMode == MODE_ON) {
+    // Check HIGH PRESSURE CUTOUT - stop pump if pressure too high
+    if (pumpState && currentPressure >= HIGH_PRESSURE_CUTOUT) {
+      pumpState = false;
+      digitalWrite(PUMP_RELAY, LOW);
+      Serial.print("High pressure cutout: ");
+      Serial.print(currentPressure);
+      Serial.println(" PSI");
+      publishPumpStatus();
+      // Not a fault - just a cutout, pump can restart when pressure drops
+      return;
+    }
+    
+    // Check OVERCURRENT only
+    if (currentAmps > OVERCURRENT_THRESHOLD) {
+      if (!overcurrentTiming) {
+        overcurrentTiming = true;
+        overcurrentStartTime = millis();
+        Serial.println("Overcurrent detected, starting 6s timer...");
+      } else {
+        if (millis() - overcurrentStartTime >= OVERCURRENT_DELAY) {
+          triggerFault(FAULT_OVERCURRENT);
+          return;
+        }
+      }
+    } else {
+      if (overcurrentTiming) {
+        Serial.println("Current normalized, overcurrent timer reset");
+        overcurrentTiming = false;
+      }
+    }
+    
+    // Ignore undercurrent in ON mode
+    if (undercurrentTiming) {
+      Serial.println("Undercurrent check disabled in ON mode");
+      undercurrentTiming = false;
+    }
+    
+    return;  // Skip AUTO mode checks
+  }
+
+  // === AUTO MODE (Full fault protection) ===
+  
+  // LOW PRESSURE: Only check in AUTO mode when pump is running
   if (pumpState && currentPressure < LOW_PRESSURE_THRESHOLD) {
     triggerFault(FAULT_LOW_PRESSURE);
     return;
@@ -548,7 +663,7 @@ void checkFaults() {
     }
   }
 
-  // UNDERCURRENT: Only check when pump is running
+  // UNDERCURRENT: Only check in AUTO mode when pump is running
   if (pumpState && currentAmps <= UNDERCURRENT_THRESHOLD) {
     if (!undercurrentTiming) {
       undercurrentTiming = true;
@@ -570,7 +685,6 @@ void checkFaults() {
 void triggerFault(FaultState fault) {
   faultState = fault;
   pumpState = false;
-  pumpRequested = false;
   digitalWrite(PUMP_RELAY, LOW);
   digitalWrite(FAULT_LIGHT, HIGH);  // Turn on fault indicator
   updateStatusLEDs();               // Update front panel LEDs
@@ -594,7 +708,6 @@ void resetFault() {
   faultState = FAULT_NONE;
   overcurrentTiming = false;
   undercurrentTiming = false;
-  pumpRequested = false;  // Require explicit ON command after reset
   digitalWrite(FAULT_LIGHT, LOW);  // Turn off fault indicator
   updateStatusLEDs();              // Update front panel LEDs
 
@@ -612,34 +725,35 @@ const char* getFaultString(FaultState fault) {
 }
 
 void updateStatusLEDs() {
-  // Turn off all fault LEDs first
-  digitalWrite(LED_LOW_PRESSURE, LOW);
-  digitalWrite(LED_OVERCURRENT, LOW);
-  digitalWrite(LED_UNDERCURRENT, LOW);
-  digitalWrite(LED_SYSTEM_OK, LOW);
-
   // Light up the appropriate LED based on fault state
-  switch (faultState) {
-    case FAULT_LOW_PRESSURE:
-      digitalWrite(LED_LOW_PRESSURE, HIGH);
-      break;
-    case FAULT_OVERCURRENT:
-      digitalWrite(LED_OVERCURRENT, HIGH);
-      break;
-    case FAULT_UNDERCURRENT:
-      digitalWrite(LED_UNDERCURRENT, HIGH);
-      break;
-    case FAULT_NONE:
-    default:
-      digitalWrite(LED_SYSTEM_OK, HIGH);  // System OK - no faults
-      break;
-  }
+  // Turn off all LEDs first, then turn on the correct one
+  digitalWrite(LED_LOW_PRESSURE, (faultState == FAULT_LOW_PRESSURE) ? HIGH : LOW);
+  digitalWrite(LED_OVERCURRENT, (faultState == FAULT_OVERCURRENT) ? HIGH : LOW);
+  digitalWrite(LED_UNDERCURRENT, (faultState == FAULT_UNDERCURRENT) ? HIGH : LOW);
+  digitalWrite(LED_SYSTEM_OK, (faultState == FAULT_NONE) ? HIGH : LOW);
 }
 
 // ============== PUMP CONTROL ==============
 
 void updatePumpOutput() {
-  bool shouldRun = (faultState == FAULT_NONE) && pumpRequested;
+  bool shouldRun = false;
+  
+  switch (operationMode) {
+    case MODE_OFF:
+      // Pump always off in OFF mode
+      shouldRun = false;
+      break;
+      
+    case MODE_ON:
+      // Pump always on in ON mode (manual/priming), unless faulted
+      shouldRun = (faultState == FAULT_NONE);
+      break;
+      
+    case MODE_AUTO:
+      // Pump on in AUTO mode, unless faulted
+      shouldRun = (faultState == FAULT_NONE);
+      break;
+  }
 
   if (shouldRun != pumpState) {
     pumpState = shouldRun;
@@ -660,6 +774,8 @@ void publishData() {
   Serial.print(currentPressure, 1);
   Serial.print(" PSI | A: ");
   Serial.print(currentAmps, 2);
+  Serial.print(" | Mode: ");
+  Serial.print(getModeString(operationMode));
   Serial.print(" | Pump: ");
   Serial.print(pumpState ? "ON" : "OFF");
   Serial.print(" | Fault: ");
@@ -682,6 +798,7 @@ void publishData() {
 void publishAllStatus() {
   publishPumpStatus();
   publishFaultStatus();
+  publishModeStatus();
 }
 
 void publishPumpStatus() {
@@ -697,5 +814,13 @@ void publishFaultStatus() {
 
   mqttClient.beginMessage(topicFault, true, 1);
   mqttClient.print(getFaultString(faultState));
+  mqttClient.endMessage();
+}
+
+void publishModeStatus() {
+  if (!mqttClient.connected()) return;
+
+  mqttClient.beginMessage(topicMode, true, 1);
+  mqttClient.print(getModeString(operationMode));
   mqttClient.endMessage();
 }

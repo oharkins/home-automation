@@ -22,7 +22,7 @@ Industrial water pump controller with pressure monitoring, current sensing, faul
 - **I1 (A0)**: 0-10V pressure sensor
 - **I2 (A1)**: 0-10V current sensor (0-20A)
 - **I3 (A2)**: Reset button (active LOW with internal pull-up)
-- **I4 (A3)**: Jog/Bypass button (active LOW with internal pull-up)
+- **I4 (A3)**: Mode switch input (optional, for future physical mode switch)
 
 ### Outputs
 - **Relay 1 (D0)**: Pump control relay
@@ -75,54 +75,79 @@ const char* mqttPass = "";                 // Optional
 ### 4. Adjust Fault Thresholds (Optional)
 
 ```cpp
-const float LOW_PRESSURE_THRESHOLD = 30.0;    // PSI
+const float LOW_PRESSURE_THRESHOLD = 30.0;    // PSI (AUTO mode)
+const float HIGH_PRESSURE_CUTOUT = 60.0;      // PSI (ON mode cutout)
 const float OVERCURRENT_THRESHOLD = 10.0;     // Amps
-const float UNDERCURRENT_THRESHOLD = 3.0;     // Amps
+const float UNDERCURRENT_THRESHOLD = 3.0;     // Amps (AUTO mode)
 const unsigned long UNDERCURRENT_DELAY = 6000; // ms
 const unsigned long OVERCURRENT_DELAY = 6000;  // ms
 ```
 
 ## Operation
 
+### Operation Modes
+
+The controller has three operation modes:
+
+#### OFF Mode
+- Pump is completely off
+- All fault checking disabled
+- Use when system is not in use
+
+#### ON Mode (Manual/Priming)
+- Pump runs continuously
+- **Ignores low pressure warnings** - perfect for priming the pump
+- **Respects high pressure cutout** - automatically stops at 60 PSI and restarts when pressure drops
+- **Ignores undercurrent faults** - allows for variable loads during priming
+- Still protects against overcurrent faults
+- Use this mode when you need to prime the pump or run it manually
+
+#### AUTO Mode (Default)
+- Normal automatic operation
+- Full fault protection active (low pressure, overcurrent, undercurrent)
+- Pump controlled via MQTT commands
+- Standard operating mode for normal use
+
 ### Normal Operation
 
-1. System starts with pump OFF
-2. Send MQTT command or use Home Assistant to turn pump ON
+1. System starts in AUTO mode with pump OFF
+2. Send MQTT command or use Home Assistant to turn pump ON (in AUTO mode)
 3. System monitors pressure and current continuously
 4. Status published to MQTT every 2 seconds
+5. Switch to ON mode for priming (bypasses low pressure fault)
 
 ### Fault Protection
 
 #### Low Pressure Fault
-- **Trigger**: Pressure < 30 PSI while pump is running
+- **Trigger**: Pressure < 30 PSI while pump is running (AUTO mode only)
 - **Action**: Pump immediately stops, fault light turns on
 - **LED**: LED 1 illuminates
-- **Bypass**: Hold jog button to bypass (for priming)
+- **Bypass**: Switch to ON mode to bypass low pressure fault for priming
+
+#### High Pressure Cutout
+- **Trigger**: Pressure ≥ 60 PSI while pump is running (ON mode only)
+- **Action**: Pump stops temporarily, automatically restarts when pressure drops
+- **LED**: No fault LED (not a fault condition)
+- **Note**: This is a safety cutout, not a fault - no reset needed
 
 #### Overcurrent Fault
-- **Trigger**: Current > 10A for more than 6 seconds
+- **Trigger**: Current > 10A for more than 6 seconds (ON and AUTO modes)
 - **Action**: Pump stops, fault light turns on
 - **LED**: LED 2 illuminates
 - **Note**: Cannot be bypassed (safety protection)
 
 #### Undercurrent Fault
-- **Trigger**: Current ≤ 3A for more than 6 seconds while running
+- **Trigger**: Current ≤ 3A for more than 6 seconds while running (AUTO mode only)
 - **Action**: Pump stops, fault light turns on
 - **LED**: LED 3 illuminates
-- **Bypass**: Hold jog button to bypass
+- **Bypass**: Switch to ON mode for manual operation (ignores undercurrent)
 
 ### Manual Controls
 
 #### Reset Button (I3)
 - Press to clear any fault condition
-- Pump will remain OFF after reset (requires new ON command)
-
-#### Jog/Bypass Button (I4)
-- Hold to run pump in jog mode
-- Bypasses low pressure and undercurrent faults
-- Useful for priming pump or testing
-- Overcurrent protection still active
-- Pump stops when button is released
+- Pump will remain OFF after reset in AUTO mode
+- In ON mode, pump will restart after fault is cleared
 
 ## MQTT Topics
 
@@ -134,22 +159,25 @@ const unsigned long OVERCURRENT_DELAY = 6000;  // ms
 | `opta/pump/amps` | Current draw in amps | `7.35` |
 | `opta/pump/status` | Pump state | `ON` or `OFF` |
 | `opta/pump/fault` | Fault status | `OK`, `LOW_PRESSURE`, `OVERCURRENT`, `UNDERCURRENT` |
+| `opta/pump/mode` | Operation mode | `OFF`, `ON`, `AUTO` |
 | `opta/pump/availability` | Device availability | `online` or `offline` |
 
 ### Subscribed Topics
 
 | Topic | Command | Description |
 |-------|---------|-------------|
-| `opta/pump/command` | `ON`, `OFF`, `TOGGLE` | Control pump |
+| `opta/pump/command` | `ON`, `OFF`, `TOGGLE` | Control pump (AUTO mode only) |
 | `opta/pump/reset` | `RESET` | Clear fault condition |
+| `opta/pump/mode/set` | `OFF`, `ON`, `AUTO` | Change operation mode |
 
 ## Home Assistant Integration
 
 The controller automatically configures Home Assistant entities via MQTT discovery:
 
+- **Select**: Pump Mode (OFF/ON/AUTO)
 - **Sensor**: Water Pressure (PSI)
 - **Sensor**: Pump Current (A)
-- **Switch**: Water Pump (ON/OFF control)
+- **Switch**: Water Pump (ON/OFF control in AUTO mode)
 - **Sensor**: Pump Fault (status text)
 - **Button**: Pump Reset (clear faults)
 
@@ -160,14 +188,14 @@ No manual configuration needed - entities appear automatically when the device c
 Connect at 115200 baud to see real-time status:
 
 ```
-P: 45.2 PSI | A: 7.35 | Pump: ON | Fault: OK | Net: MQTT
+P: 45.2 PSI | A: 7.35 | Mode: AUTO | Pump: ON | Fault: OK | Net: MQTT
 ```
 
 Status indicators:
 - **P**: Pressure reading
 - **A**: Current reading
+- **Mode**: Current operation mode (OFF/ON/AUTO)
 - **Pump**: ON/OFF state
-- **[JOG]**: Appears when jog button is held
 - **Fault**: Current fault state
 - **Net**: Network status (MQTT/ETH/DOWN)
 
