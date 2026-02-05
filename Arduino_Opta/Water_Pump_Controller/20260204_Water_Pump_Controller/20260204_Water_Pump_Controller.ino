@@ -160,11 +160,12 @@ const unsigned long UNDERCURRENT_DELAY = 6000; // ms - must be below for this du
 const unsigned long OVERCURRENT_DELAY = 6000; // ms - must exceed for this duration
 
 // Timing
-const unsigned long PUBLISH_INTERVAL = 2000;
+const unsigned long PUBLISH_INTERVAL = 1000;
 const unsigned long RECONNECT_INTERVAL = 5000;
 const unsigned long DEBOUNCE_DELAY = 50;
 const unsigned long ETH_CHECK_INTERVAL = 1000;
 const int MQTT_CONNECT_TIMEOUT = 2000;  // ms - non-blocking timeout
+const unsigned long PRESSURE_GRACE_PERIOD = 6000;  // ms - ignore low pressure after reset
 
 // ============== PIN DEFINITIONS ==============
 
@@ -230,6 +231,7 @@ unsigned long overcurrentStartTime = 0;
 bool overcurrentTiming = false;
 unsigned long undercurrentStartTime = 0;
 bool undercurrentTiming = false;
+unsigned long pressureGraceEndTime = 0;  // Time when pressure grace period ends
 
 unsigned long lastPublish = 0;
 unsigned long lastReconnect = 0;
@@ -415,8 +417,7 @@ void reconnectMQTT() {
 
   // Subscribe to topics
   mqttClient.subscribe(topicReset);
-  mqttClient.subscribe(topicModeCommand);
-  Serial.println("Subscribed to reset and mode topics");
+  Serial.println("Subscribed to reset topic");
 
   // Send Home Assistant discovery configs
   sendHADiscovery();
@@ -439,18 +440,6 @@ void onMqttMessage(int messageSize) {
   Serial.print(topic);
   Serial.print("]: ");
   Serial.println(message);
-
-  // Handle mode change commands
-  if (topic == topicModeCommand) {
-    if (message == "OFF" || message == "0") {
-      setOperationMode(MODE_OFF);
-    } else if (message == "ON" || message == "1" || message == "MANUAL") {
-      setOperationMode(MODE_ON);
-    } else if (message == "AUTO" || message == "2" || message == "AUTOMATIC") {
-      setOperationMode(MODE_AUTO);
-    }
-    return;
-  }
 
   // Handle reset command
   if (topic == topicReset) {
@@ -508,10 +497,10 @@ void sendHADiscovery() {
   mqttClient.endMessage();
   delay(100);
 
-  // --- Mode Select (OFF/ON/AUTO) ---
-  String modeJson = "{\"name\":\"Pump Mode\",\"uniq_id\":\"opta_pump_mode\",\"stat_t\":\"opta/pump/mode\",\"cmd_t\":\"opta/pump/mode/set\",\"options\":[\"OFF\",\"ON\",\"AUTO\"],\"icon\":\"mdi:toggle-switch\",\"avty_t\":\"opta/pump/availability\",\"pl_avail\":\"online\",\"pl_not_avail\":\"offline\",\"dev\":{\"ids\":[\"opta_pump\"],\"name\":\"Water Pump Controller\",\"mf\":\"Arduino\",\"mdl\":\"Opta\"}}";
+  // --- Mode Sensor (read-only) ---
+  String modeJson = "{\"name\":\"Pump Mode\",\"uniq_id\":\"opta_pump_mode\",\"stat_t\":\"opta/pump/mode\",\"icon\":\"mdi:toggle-switch\",\"avty_t\":\"opta/pump/availability\",\"pl_avail\":\"online\",\"pl_not_avail\":\"offline\",\"dev\":{\"ids\":[\"opta_pump\"],\"name\":\"Water Pump Controller\",\"mf\":\"Arduino\",\"mdl\":\"Opta\"}}";
   
-  mqttClient.beginMessage("homeassistant/select/opta_pump_mode/config", true, 1);
+  mqttClient.beginMessage("homeassistant/sensor/opta_pump_mode/config", true, 1);
   mqttClient.print(modeJson);
   mqttClient.endMessage();
   delay(100);
@@ -588,10 +577,6 @@ void checkModeSelector() {
 
   // Only change mode if different
   if (newMode != operationMode) {
-    Serial.print("Mode selector changed: ");
-    Serial.print(pinA ? "1" : "0");
-    Serial.print(pinB ? "1" : "0");
-    Serial.print(" -> ");
     setOperationMode(newMode);
   }
 }
@@ -681,9 +666,24 @@ void checkFaults() {
   // === AUTO MODE (Full fault protection) ===
   
   // LOW PRESSURE: Only check in AUTO mode when pump is running
-  if (pumpState && currentPressure < LOW_PRESSURE_THRESHOLD) {
-    triggerFault(FAULT_LOW_PRESSURE);
-    return;
+  // Skip check during grace period after reset
+  bool inGracePeriod = (pressureGraceEndTime > 0 && millis() < pressureGraceEndTime);
+  
+  if (inGracePeriod && pumpState) {
+    // Still in grace period - don't check low pressure
+    // (Optional: could add a serial message here for debugging)
+  } else {
+    // Grace period expired or not active
+    if (pressureGraceEndTime > 0 && millis() >= pressureGraceEndTime) {
+      Serial.println("Pressure grace period ended");
+      pressureGraceEndTime = 0;  // Clear grace period flag
+    }
+    
+    // Normal low pressure check
+    if (pumpState && currentPressure < LOW_PRESSURE_THRESHOLD) {
+      triggerFault(FAULT_LOW_PRESSURE);
+      return;
+    }
   }
 
   // OVERCURRENT: Must exceed threshold for OVERCURRENT_DELAY duration
@@ -746,10 +746,11 @@ void resetFault() {
     return;
   }
 
-  Serial.println("Fault cleared");
+  Serial.println("Fault cleared - starting 7s pressure grace period");
   faultState = FAULT_NONE;
   overcurrentTiming = false;
   undercurrentTiming = false;
+  pressureGraceEndTime = millis() + PRESSURE_GRACE_PERIOD;  // Start grace period
   digitalWrite(FAULT_LIGHT, LOW);  // Turn off fault indicator
   updateStatusLEDs();              // Update front panel LEDs
 
