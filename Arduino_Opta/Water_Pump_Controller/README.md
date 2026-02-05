@@ -22,7 +22,8 @@ Industrial water pump controller with pressure monitoring, current sensing, faul
 - **I1 (A0)**: 0-10V pressure sensor
 - **I2 (A1)**: 0-10V current sensor (0-20A)
 - **I3 (A2)**: Reset button (active LOW with internal pull-up)
-- **I4 (A3)**: Mode switch input (optional, for future physical mode switch)
+- **I7 (A6)**: Mode selector - Pin A (requires external 10K pull-up resistor)
+- **I8 (A7)**: Mode selector - Pin B (requires external 10K pull-up resistor)
 
 ### Outputs
 - **Relay 1 (D0)**: Pump control relay
@@ -85,6 +86,79 @@ const unsigned long OVERCURRENT_DELAY = 6000;  // ms
 
 ## Operation
 
+### Physical Control Panel Wiring
+
+#### Reset Button (I3 / A2)
+Connect a momentary push button between I3 and GND:
+- Internal pull-up resistor enabled (active LOW)
+- Press to clear any fault condition
+- Works in all operation modes
+
+#### Mode Selector (I7 / A6 and I8 / A7)
+
+**IMPORTANT: External pull-up resistors required!** The Opta's analog input pins do not support internal pull-ups.
+
+The mode selector uses 2 digital inputs to create a 3-position switch:
+
+**Pin State Truth Table:**
+
+| Position | Pin A (I7) | Pin B (I8) | Mode |
+|----------|------------|------------|------|
+| 1 | HIGH | HIGH | OFF |
+| 2 | LOW | HIGH | ON (Manual/Priming) |
+| 3 | HIGH | LOW | AUTO |
+
+**Required Components:**
+- Two 10K ohm resistors (pull-up resistors)
+- 3-position rotary switch OR two SPST toggle switches
+
+**Wiring Option 1: 3-Position Rotary Switch (Recommended)**
+
+```
+     +V (use +24V, +5V, or +3.3V from Opta)
+      |           |
+     10K         10K  (pull-up resistors)
+      |           |
+   I7 (A6)    I8 (A7)
+      |           |
+Position 1: Open      Open       → OFF mode
+Position 2: Ground    Open       → ON mode  
+Position 3: Open      Ground     → AUTO mode
+      |           |
+   Common Ground (GND)
+```
+
+Wiring steps:
+1. Connect a 10K resistor from I7 to +V (use Opta's +24V output or external +5V/+3.3V)
+2. Connect a 10K resistor from I8 to +V
+3. Connect the common terminal of the rotary switch to GND
+4. Connect one position terminal to I7 (A6)
+5. Connect another position terminal to I8 (A7)
+6. Leave the third position unconnected (both pins HIGH = OFF)
+
+**Wiring Option 2: Two SPST Toggle Switches**
+
+```
+     +V              +V
+      |               |
+     10K             10K
+      |               |
+Switch A: I7 (A6) ←→ GND
+Switch B: I8 (A7) ←→ GND
+
+Both OFF (HIGH/HIGH) = OFF mode
+Switch A ON (LOW/HIGH) = ON mode
+Switch B ON (HIGH/LOW) = AUTO mode
+(Both ON is reserved/defaults to OFF)
+```
+
+**Notes:**
+- **External 10K pull-up resistors are required** - Opta analog inputs don't have internal pull-ups
+- Use the Opta's +24V output, or external +5V/+3.3V for the pull-up voltage
+- Mode changes are debounced and published to MQTT automatically
+- Mode can also be changed via MQTT if physical switch is not installed
+- Current mode is always displayed in Home Assistant
+
 ### Operation Modes
 
 The controller has three operation modes:
@@ -105,16 +179,16 @@ The controller has three operation modes:
 #### AUTO Mode (Default)
 - Normal automatic operation
 - Full fault protection active (low pressure, overcurrent, undercurrent)
-- Pump controlled via MQTT commands
+- Pump turns on automatically when mode is selected
 - Standard operating mode for normal use
 
 ### Normal Operation
 
-1. System starts in AUTO mode with pump OFF
-2. Send MQTT command or use Home Assistant to turn pump ON (in AUTO mode)
-3. System monitors pressure and current continuously
-4. Status published to MQTT every 2 seconds
-5. Switch to ON mode for priming (bypasses low pressure fault)
+1. Set mode selector to desired position (or use MQTT to change mode)
+2. In AUTO mode, pump turns on automatically with full fault protection
+3. In ON mode, pump runs continuously (for priming/manual operation)
+4. System monitors pressure and current continuously
+5. Status published to MQTT every 2 seconds
 
 ### Fault Protection
 
@@ -146,8 +220,16 @@ The controller has three operation modes:
 
 #### Reset Button (I3)
 - Press to clear any fault condition
-- Pump will remain OFF after reset in AUTO mode
-- In ON mode, pump will restart after fault is cleared
+- Pump behavior after reset depends on mode:
+  - **OFF mode**: Pump stays off
+  - **ON mode**: Pump restarts immediately
+  - **AUTO mode**: Pump restarts immediately
+
+#### Mode Selector (I7 + I8)
+- Physical 3-position switch to select operation mode
+- Changes take effect immediately
+- Current mode is published to MQTT and visible in Home Assistant
+- Can also be changed remotely via MQTT
 
 ## MQTT Topics
 
@@ -166,7 +248,6 @@ The controller has three operation modes:
 
 | Topic | Command | Description |
 |-------|---------|-------------|
-| `opta/pump/command` | `ON`, `OFF`, `TOGGLE` | Control pump (AUTO mode only) |
 | `opta/pump/reset` | `RESET` | Clear fault condition |
 | `opta/pump/mode/set` | `OFF`, `ON`, `AUTO` | Change operation mode |
 
@@ -174,10 +255,10 @@ The controller has three operation modes:
 
 The controller automatically configures Home Assistant entities via MQTT discovery:
 
-- **Select**: Pump Mode (OFF/ON/AUTO)
+- **Select**: Pump Mode (OFF/ON/AUTO) - control via UI or physical switch
 - **Sensor**: Water Pressure (PSI)
 - **Sensor**: Pump Current (A)
-- **Switch**: Water Pump (ON/OFF control in AUTO mode)
+- **Binary Sensor**: Water Pump Status (read-only, shows ON/OFF state)
 - **Sensor**: Pump Fault (status text)
 - **Button**: Pump Reset (clear faults)
 
@@ -212,9 +293,11 @@ Status indicators:
 - Ensure broker is running and accessible
 
 ### Pump Won't Start
+- Check current mode (must be ON or AUTO for pump to run)
 - Check for active fault (LED 1, 2, or 3 lit)
 - Press reset button to clear fault
-- Verify MQTT command is being received (check serial monitor)
+- Verify mode selector wiring if using physical switch
+- Check serial monitor for mode changes
 
 ### False Fault Triggers
 - Adjust threshold values in configuration

@@ -7,15 +7,52 @@
  * - Reads 0-10V / 0-20A current sensor on I2 (A1)
  * - Controls pump via Relay 1 (D0)
  * - Fault indicator light on Relay 2 (D1)
+ * - Physical reset button on I3 (A2)
+ * - 3-position mode selector on I7 (A6) and I8 (A7)
  * - Front panel status LEDs:
  *     LED 1: Low Pressure fault
  *     LED 2: Overcurrent fault
  *     LED 3: Undercurrent fault
  *     LED 4: System OK (no faults)
  * - Publishes pressure, amps, pump status, fault status to MQTT
- * - Subscribes to MQTT for pump on/off and reset commands
+ * - Subscribes to MQTT for mode changes and reset commands
  * - Home Assistant auto-discovery
  * - Non-blocking network: local control works even if network is down
+ *
+ * Physical Control Panel Wiring:
+ * ==============================
+ * 
+ * RESET BUTTON (I3 / A2):
+ * - Connect momentary push button between I3 and GND
+ * - Internal pull-up resistor enabled (active LOW)
+ * - Press to clear any fault condition
+ * 
+ * MODE SELECTOR (I7 / A6 and I8 / A7):
+ * - REQUIRES EXTERNAL 10K PULL-UP RESISTORS (Opta analog inputs don't support internal pull-ups)
+ * - Use a 3-position rotary switch with common ground
+ * - Pin states determine operation mode:
+ * 
+ *   Position | Pin A (I7) | Pin B (I8) | Mode
+ *   ---------|------------|------------|------
+ *      1     |   HIGH     |   HIGH     | OFF
+ *      2     |   LOW      |   HIGH     | ON (Manual/Priming)
+ *      3     |   HIGH     |   LOW      | AUTO
+ * 
+ * Wiring Example for 3-Position Rotary Switch:
+ *   - Add 10K resistor from I7 to +V (use +24V, +5V, or +3.3V available on Opta)
+ *   - Add 10K resistor from I8 to +V
+ *   - Connect common terminal of rotary switch to GND
+ *   - Position 1: No connection (both pins HIGH via pull-ups) = OFF
+ *   - Position 2: Connect to I7 (grounds Pin A) = ON
+ *   - Position 3: Connect to I8 (grounds Pin B) = AUTO
+ * 
+ * Alternative: Use two SPST toggle switches:
+ *   - Add 10K pull-up resistors as above
+ *   - Switch A between I7 and GND
+ *   - Switch B between I8 and GND
+ *   - Both OFF (HIGH/HIGH) = OFF mode
+ *   - Switch A ON (LOW/HIGH) = ON mode
+ *   - Switch B ON (HIGH/LOW) = AUTO mode
  *
  * Operation Modes:
  * - OFF:  Pump is completely off, all fault checking disabled
@@ -135,7 +172,20 @@ const int MQTT_CONNECT_TIMEOUT = 2000;  // ms - non-blocking timeout
 
 // Digital Inputs
 #define RESET_BUTTON_PIN A2  // I3 - Reset button (active LOW with internal pull-up)
-#define MODE_SWITCH_PIN  A3  // I4 - Mode switch input (for physical toggle if needed)
+#define MODE_SELECT_A    A6  // I7 - Mode selector bit 0 (REQUIRES EXTERNAL 10K PULL-UP to +3.3V or +5V)
+#define MODE_SELECT_B    A7  // I8 - Mode selector bit 1 (REQUIRES EXTERNAL 10K PULL-UP to +3.3V or +5V)
+
+// IMPORTANT: Opta analog inputs (A3-A7) do NOT support INPUT_PULLUP!
+// You MUST add external 10K pull-up resistors:
+//   - Connect 10K resistor from I7 to +V (use Opta's +24V or external +5V/+3.3V)
+//   - Connect 10K resistor from I8 to +V
+//   - Connect switches to pull pins to GND
+//
+// Mode selector truth table (active LOW with EXTERNAL pull-ups):
+// A=HIGH, B=HIGH (11) = OFF mode
+// A=LOW,  B=HIGH (01) = ON mode (manual/priming)
+// A=HIGH, B=LOW  (10) = AUTO mode
+// A=LOW,  B=LOW  (00) = Reserved/unused
 
 // Relay Outputs
 #define PUMP_RELAY  D0       // Relay 1 - Pump control
@@ -183,6 +233,7 @@ bool undercurrentTiming = false;
 unsigned long lastPublish = 0;
 unsigned long lastReconnect = 0;
 unsigned long lastButtonRead = 0;
+unsigned long lastModeRead = 0;
 unsigned long lastEthCheck = 0;
 bool lastButtonState = HIGH;
 bool ethConnected = false;
@@ -213,9 +264,10 @@ void setup() {
   pinMode(LED_SYSTEM_OK, OUTPUT);
   updateStatusLEDs();  // Set initial LED state
 
-  // Initialize button inputs (active LOW with internal pull-up)
-  pinMode(RESET_BUTTON_PIN, INPUT_PULLUP);
-  pinMode(MODE_SWITCH_PIN, INPUT_PULLUP);  // Optional physical mode switch
+  // Initialize button inputs
+  pinMode(RESET_BUTTON_PIN, INPUT_PULLUP);  // I3 has internal pull-up
+  pinMode(MODE_SELECT_A, INPUT);            // I7 - external pull-up required
+  pinMode(MODE_SELECT_B, INPUT);            // I8 - external pull-up required
 
   // Configure analog resolution
   analogReadResolution(12);
@@ -253,6 +305,9 @@ void loop() {
 
   // Read sensors
   readSensors();
+
+  // Check for mode selector changes
+  checkModeSelector();
 
   // Check for reset button press
   checkResetButton();
@@ -553,6 +608,44 @@ void checkResetButton() {
   }
 
   lastButtonState = buttonState;
+}
+
+// ============== MODE SELECTOR ==============
+
+void checkModeSelector() {
+  unsigned long now = millis();
+  if (now - lastModeRead < DEBOUNCE_DELAY) return;
+  lastModeRead = now;
+
+  // Read mode selector pins (active LOW with external pull-ups)
+  bool pinA = digitalRead(MODE_SELECT_A);
+  bool pinB = digitalRead(MODE_SELECT_B);
+
+  // Determine mode from truth table
+  OperationMode newMode;
+  
+  if (pinA == HIGH && pinB == HIGH) {
+    // 11 = OFF mode
+    newMode = MODE_OFF;
+  } else if (pinA == LOW && pinB == HIGH) {
+    // 01 = ON mode (manual/priming)
+    newMode = MODE_ON;
+  } else if (pinA == HIGH && pinB == LOW) {
+    // 10 = AUTO mode
+    newMode = MODE_AUTO;
+  } else {
+    // 00 = Reserved/unused, default to OFF for safety
+    newMode = MODE_OFF;
+  }
+
+  // Only change mode if different
+  if (newMode != operationMode) {
+    Serial.print("Mode selector changed: ");
+    Serial.print(pinA ? "1" : "0");
+    Serial.print(pinB ? "1" : "0");
+    Serial.print(" -> ");
+    setOperationMode(newMode);
+  }
 }
 
 // ============== OPERATION MODE CONTROL ==============
