@@ -118,7 +118,7 @@
 // ============== CONFIGURATION ==============
 
 // Network Settings
-const byte mac[] = { 0xA8, 0x61, 0x0A, 0x50, 0xA6, 0xB7 };
+byte mac[] = { 0xA8, 0x61, 0x0A, 0x50, 0xA6, 0xB7 };  // Non-const required by Ethernet library
 const IPAddress ip(10, 58, 82, 99);
 const IPAddress gateway(10, 58, 82, 1);
 const IPAddress subnet(255, 255, 255, 0);
