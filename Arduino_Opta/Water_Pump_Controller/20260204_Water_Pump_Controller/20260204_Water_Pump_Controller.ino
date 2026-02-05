@@ -7,7 +7,7 @@
  * - Reads 0-10V / 0-20A current sensor on I2 (A1)
  * - Controls pump via Relay 1 (D0)
  * - Fault indicator light on Relay 2 (D1)
- * - Physical reset button on I3 (A2)
+ * - User button (BTN_USER) for fault reset
  * - 3-position mode selector on I7 (A6) and I8 (A7)
  * - Front panel status LEDs:
  *     LED 1: Low Pressure fault
@@ -22,9 +22,8 @@
  * Physical Control Panel Wiring:
  * ==============================
  * 
- * RESET BUTTON (I3 / A2):
- * - Connect momentary push button between I3 and GND
- * - Internal pull-up resistor enabled (active LOW)
+ * RESET BUTTON:
+ * - Use the built-in USER button on the Opta (BTN_USER)
  * - Press to clear any fault condition
  * 
  * MODE SELECTOR (I7 / A6 and I8 / A7):
@@ -56,6 +55,7 @@
  *
  * Operation Modes:
  * - OFF:  Pump is completely off, all fault checking disabled
+ *         - Cycling to OFF mode automatically clears any active faults
  * - ON:   Pump runs continuously (manual/priming mode)
  *         - Ignores low pressure warnings (for priming)
  *         - Respects HIGH PRESSURE CUTOUT (stops at 60 PSI, auto-restarts when pressure drops)
@@ -70,7 +70,7 @@
  * - HIGH PRESSURE: Cutout at 60 PSI in ON mode (not a fault, auto-restarts)
  * - OVERCURRENT:   Faults if amps > 10A for more than 6 seconds (ON and AUTO modes)
  * - UNDERCURRENT:  Faults if amps <= 3A for more than 6 seconds while running (AUTO mode only)
- * - Reset via physical button on I3 (A2) or MQTT reset command
+ * - Reset via USER button, cycling mode selector to OFF, or MQTT reset command
  *
  * MQTT Topics:
  *   Publish:
@@ -99,10 +99,12 @@
  *
  * Required Libraries (via Library Manager):
  * - ArduinoMqttClient
+ * - Arduino_JSON
  */
 
 #include <Ethernet.h>
 #include <ArduinoMqttClient.h>
+#include <Arduino_JSON.h>
 
 // ============== OPTA STATUS LED PINS ==============
 // The 4 green status LEDs on the Opta front panel
@@ -171,7 +173,6 @@ const int MQTT_CONNECT_TIMEOUT = 2000;  // ms - non-blocking timeout
 #define AMP_PIN      A1      // I2 - Current sensor 0-10V
 
 // Digital Inputs
-#define RESET_BUTTON_PIN A2  // I3 - Reset button (active LOW with internal pull-up)
 #define MODE_SELECT_A    A6  // I7 - Mode selector bit 0 (REQUIRES EXTERNAL 10K PULL-UP to +3.3V or +5V)
 #define MODE_SELECT_B    A7  // I8 - Mode selector bit 1 (REQUIRES EXTERNAL 10K PULL-UP to +3.3V or +5V)
 
@@ -235,7 +236,7 @@ unsigned long lastReconnect = 0;
 unsigned long lastButtonRead = 0;
 unsigned long lastModeRead = 0;
 unsigned long lastEthCheck = 0;
-bool lastButtonState = HIGH;
+bool lastButtonState = LOW;
 bool ethConnected = false;
 bool mqttConfigured = false;
 
@@ -265,7 +266,7 @@ void setup() {
   updateStatusLEDs();  // Set initial LED state
 
   // Initialize button inputs
-  pinMode(RESET_BUTTON_PIN, INPUT_PULLUP);  // I3 has internal pull-up
+  pinMode(BTN_USER, INPUT);                 // Built-in USER button
   pinMode(MODE_SELECT_A, INPUT);            // I7 - external pull-up required
   pinMode(MODE_SELECT_B, INPUT);            // I8 - external pull-up required
 
@@ -464,108 +465,112 @@ void onMqttMessage(int messageSize) {
 void sendHADiscovery() {
   Serial.println("Sending Home Assistant discovery configs...");
 
-  String deviceJson = String("\"dev\":{") +
-    "\"ids\":[\"" + deviceId + "\"]," +
-    "\"name\":\"" + deviceName + "\"," +
-    "\"mf\":\"" + manufacturer + "\"," +
-    "\"mdl\":\"" + model + "\"" +
-    "}";
-
-  String availabilityJson = String("\"avty_t\":\"") + topicAvailability + "\","
-    "\"pl_avail\":\"online\","
-    "\"pl_not_avail\":\"offline\"";
+  // Create device object (reused for all entities)
+  JSONVar device;
+  device["ids"][0] = deviceId;
+  device["name"] = deviceName;
+  device["mf"] = manufacturer;
+  device["mdl"] = model;
 
   // --- Pressure Sensor ---
-  String pressureConfig = String("{") +
-    "\"name\":\"Water Pressure\"," +
-    "\"uniq_id\":\"" + deviceId + "_pressure\"," +
-    "\"stat_t\":\"" + topicPressure + "\"," +
-    "\"unit_of_meas\":\"PSI\"," +
-    "\"dev_cla\":\"pressure\"," +
-    "\"stat_cla\":\"measurement\"," +
-    "\"icon\":\"mdi:gauge\"," +
-    availabilityJson + "," +
-    deviceJson +
-    "}";
+  JSONVar pressureConfig;
+  pressureConfig["name"] = "Water Pressure";
+  pressureConfig["uniq_id"] = String(deviceId) + "_pressure";
+  pressureConfig["stat_t"] = topicPressure;
+  pressureConfig["unit_of_meas"] = "PSI";
+  pressureConfig["dev_cla"] = "pressure";
+  pressureConfig["stat_cla"] = "measurement";
+  pressureConfig["icon"] = "mdi:gauge";
+  pressureConfig["avty_t"] = topicAvailability;
+  pressureConfig["pl_avail"] = "online";
+  pressureConfig["pl_not_avail"] = "offline";
+  pressureConfig["dev"] = device;
 
   mqttClient.beginMessage("homeassistant/sensor/opta_pump_pressure/config", true, 1);
-  mqttClient.print(pressureConfig);
+  mqttClient.print(JSON.stringify(pressureConfig));
   mqttClient.endMessage();
 
   // --- Amps Sensor ---
-  String ampsConfig = String("{") +
-    "\"name\":\"Pump Current\"," +
-    "\"uniq_id\":\"" + deviceId + "_amps\"," +
-    "\"stat_t\":\"" + topicAmps + "\"," +
-    "\"unit_of_meas\":\"A\"," +
-    "\"dev_cla\":\"current\"," +
-    "\"stat_cla\":\"measurement\"," +
-    "\"icon\":\"mdi:current-ac\"," +
-    availabilityJson + "," +
-    deviceJson +
-    "}";
+  JSONVar ampsConfig;
+  ampsConfig["name"] = "Pump Current";
+  ampsConfig["uniq_id"] = String(deviceId) + "_amps";
+  ampsConfig["stat_t"] = topicAmps;
+  ampsConfig["unit_of_meas"] = "A";
+  ampsConfig["dev_cla"] = "current";
+  ampsConfig["stat_cla"] = "measurement";
+  ampsConfig["icon"] = "mdi:current-ac";
+  ampsConfig["avty_t"] = topicAvailability;
+  ampsConfig["pl_avail"] = "online";
+  ampsConfig["pl_not_avail"] = "offline";
+  ampsConfig["dev"] = device;
 
   mqttClient.beginMessage("homeassistant/sensor/opta_pump_amps/config", true, 1);
-  mqttClient.print(ampsConfig);
+  mqttClient.print(JSON.stringify(ampsConfig));
   mqttClient.endMessage();
 
   // --- Pump Status Sensor (read-only) ---
-  String statusConfig = String("{") +
-    "\"name\":\"Water Pump Status\"," +
-    "\"uniq_id\":\"" + deviceId + "_status\"," +
-    "\"stat_t\":\"" + topicStatus + "\"," +
-    "\"icon\":\"mdi:water-pump\"," +
-    availabilityJson + "," +
-    deviceJson +
-    "}";
+  JSONVar statusConfig;
+  statusConfig["name"] = "Water Pump Status";
+  statusConfig["uniq_id"] = String(deviceId) + "_status";
+  statusConfig["stat_t"] = topicStatus;
+  statusConfig["icon"] = "mdi:water-pump";
+  statusConfig["avty_t"] = topicAvailability;
+  statusConfig["pl_avail"] = "online";
+  statusConfig["pl_not_avail"] = "offline";
+  statusConfig["dev"] = device;
 
   mqttClient.beginMessage("homeassistant/binary_sensor/opta_pump_status/config", true, 1);
-  mqttClient.print(statusConfig);
+  mqttClient.print(JSON.stringify(statusConfig));
   mqttClient.endMessage();
 
   // --- Fault Status Sensor ---
-  String faultConfig = String("{") +
-    "\"name\":\"Pump Fault\"," +
-    "\"uniq_id\":\"" + deviceId + "_fault\"," +
-    "\"stat_t\":\"" + topicFault + "\"," +
-    "\"icon\":\"mdi:alert-circle\"," +
-    availabilityJson + "," +
-    deviceJson +
-    "}";
+  JSONVar faultConfig;
+  faultConfig["name"] = "Pump Fault";
+  faultConfig["uniq_id"] = String(deviceId) + "_fault";
+  faultConfig["stat_t"] = topicFault;
+  faultConfig["icon"] = "mdi:alert-circle";
+  faultConfig["avty_t"] = topicAvailability;
+  faultConfig["pl_avail"] = "online";
+  faultConfig["pl_not_avail"] = "offline";
+  faultConfig["dev"] = device;
 
   mqttClient.beginMessage("homeassistant/sensor/opta_pump_fault/config", true, 1);
-  mqttClient.print(faultConfig);
+  mqttClient.print(JSON.stringify(faultConfig));
   mqttClient.endMessage();
 
   // --- Reset Button (as a button entity in HA) ---
-  String resetConfig = String("{") +
-    "\"name\":\"Pump Reset\"," +
-    "\"uniq_id\":\"" + deviceId + "_reset\"," +
-    "\"cmd_t\":\"" + topicReset + "\"," +
-    "\"pl_prs\":\"RESET\"," +
-    "\"icon\":\"mdi:restart\"," +
-    availabilityJson + "," +
-    deviceJson +
-    "}";
+  JSONVar resetConfig;
+  resetConfig["name"] = "Pump Reset";
+  resetConfig["uniq_id"] = String(deviceId) + "_reset";
+  resetConfig["cmd_t"] = topicReset;
+  resetConfig["pl_prs"] = "RESET";
+  resetConfig["icon"] = "mdi:restart";
+  resetConfig["avty_t"] = topicAvailability;
+  resetConfig["pl_avail"] = "online";
+  resetConfig["pl_not_avail"] = "offline";
+  resetConfig["dev"] = device;
 
   mqttClient.beginMessage("homeassistant/button/opta_pump_reset/config", true, 1);
-  mqttClient.print(resetConfig);
+  mqttClient.print(JSON.stringify(resetConfig));
   mqttClient.endMessage();
 
   // --- Mode Select (OFF/ON/AUTO) ---
-  String modeConfig = String("{") +
-    "\"name\":\"Pump Mode\"," +
-    "\"uniq_id\":\"" + deviceId + "_mode\"," +
-    "\"stat_t\":\"" + topicMode + "\"," +
-    "\"cmd_t\":\"" + topicModeCommand + "\"," +
-    "\"options\":[\"OFF\",\"ON\",\"AUTO\"]," +
-    "\"icon\":\"mdi:toggle-switch\"," +
-    availabilityJson + "," +
-    deviceJson +
-    "}";
+  JSONVar modeConfig;
+  modeConfig["name"] = "Pump Mode";
+  modeConfig["uniq_id"] = String(deviceId) + "_mode";
+  modeConfig["stat_t"] = topicMode;
+  modeConfig["cmd_t"] = topicModeCommand;
+  modeConfig["options"][0] = "OFF";
+  modeConfig["options"][1] = "ON";
+  modeConfig["options"][2] = "AUTO";
+  modeConfig["icon"] = "mdi:toggle-switch";
+  modeConfig["avty_t"] = topicAvailability;
+  modeConfig["pl_avail"] = "online";
+  modeConfig["pl_not_avail"] = "offline";
+  modeConfig["dev"] = device;
 
   mqttClient.beginMessage("homeassistant/select/opta_pump_mode/config", true, 1);
-  mqttClient.print(modeConfig);
+  mqttClient.print(JSON.stringify(modeConfig));
   mqttClient.endMessage();
 
   Serial.println("Home Assistant discovery complete!");
@@ -598,12 +603,12 @@ void checkResetButton() {
   if (now - lastButtonRead < DEBOUNCE_DELAY) return;
   lastButtonRead = now;
 
-  // Read button (active LOW with pull-up)
-  bool buttonState = digitalRead(RESET_BUTTON_PIN);
+  // Read USER button (active HIGH when pressed on Opta)
+  bool buttonState = digitalRead(BTN_USER);
 
-  // Detect falling edge (button press)
-  if (lastButtonState == HIGH && buttonState == LOW) {
-    Serial.println("Reset button pressed");
+  // Detect rising edge (button press)
+  if (lastButtonState == LOW && buttonState == HIGH) {
+    Serial.println("USER button pressed - resetting fault");
     resetFault();
   }
 
@@ -657,8 +662,9 @@ void setOperationMode(OperationMode newMode) {
   Serial.print("Mode changed to: ");
   Serial.println(getModeString(operationMode));
   
-  // Clear fault when changing modes
-  if (faultState != FAULT_NONE) {
+  // Clear fault when cycling to OFF mode
+  if (newMode == MODE_OFF && faultState != FAULT_NONE) {
+    Serial.println("Cycling to OFF mode - clearing fault");
     resetFault();
   }
   
