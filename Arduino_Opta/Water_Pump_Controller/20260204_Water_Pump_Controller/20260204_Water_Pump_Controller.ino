@@ -5,6 +5,8 @@
  * Features:
  * - Reads 0-10V pressure sensor on I1 (A0)
  * - Reads 0-10V / 0-20A current sensor on I2 (A1)
+ * - Reads 4-20mA water depth sensor 1 on I4 (A3) - 0-2m range
+ * - Reads 4-20mA water depth sensor 2 on I5 (A4) - 0-2m range
  * - Controls pump via Relay 1 (D0)
  * - Fault indicator light on Relay 2 (D1)
  * - User button (BTN_USER) for fault reset
@@ -14,7 +16,7 @@
  *     LED 2: Overcurrent fault
  *     LED 3: Undercurrent fault
  *     LED 4: System OK (no faults)
- * - Publishes pressure, amps, pump status, fault status to MQTT
+ * - Publishes pressure, amps, depth1, depth2, pump status, fault status to MQTT
  * - Subscribes to MQTT for mode changes and reset commands
  * - Home Assistant auto-discovery
  * - Non-blocking network: local control works even if network is down
@@ -80,6 +82,8 @@
  *   Publish:
  *     opta/pump/pressure     - Current pressure (PSI)
  *     opta/pump/amps         - Current draw in amps
+ *     opta/pump/depth1       - Water depth sensor 1 in meters (0-2m)
+ *     opta/pump/depth2       - Water depth sensor 2 in meters (0-2m)
  *     opta/pump/status       - "ON" or "OFF"
  *     opta/pump/fault        - "OK", "LOW_PRESSURE", "OVERCURRENT", or "UNDERCURRENT"
  *     opta/pump/mode         - "OFF", "ON", or "AUTO"
@@ -142,6 +146,8 @@ const char* model = "Opta";
 // MQTT Topics
 const char* topicPressure     = "opta/pump/pressure";
 const char* topicAmps         = "opta/pump/amps";
+const char* topicDepth1       = "opta/pump/depth1";
+const char* topicDepth2       = "opta/pump/depth2";
 const char* topicStatus       = "opta/pump/status";
 const char* topicFault        = "opta/pump/fault";
 const char* topicReset        = "opta/pump/reset";
@@ -154,6 +160,8 @@ const float PRESSURE_MAX = 87.0;
 const float PRESSURE_MIN = 0.0;
 const float AMP_MAX = 20.0;
 const float AMP_MIN = 0.0;
+const float DEPTH_MAX = 2.0;      // meters - max depth
+const float DEPTH_MIN = 0.0;      // meters - min depth
 
 // Fault Thresholds
 const float LOW_PRESSURE_THRESHOLD = 30.0;    // PSI - fault if below this
@@ -176,6 +184,8 @@ const unsigned long PRESSURE_GRACE_PERIOD = 6000;
 // Analog Inputs
 #define PRESSURE_PIN A0      // I1 - Pressure sensor 0-10V
 #define AMP_PIN      A1      // I2 - Current sensor 0-10V
+#define DEPTH_PIN_1  A3      // I4 - Water depth sensor 1, 4-20mA (0-2m)
+#define DEPTH_PIN_2  A4      // I5 - Water depth sensor 2, 4-20mA (0-2m)
 
 // Digital Inputs
 #define RESET_BUTTON     A5  // I6 - External reset button (REQUIRES EXTERNAL 10K PULL-UP to +3.3V or +5V)
@@ -230,6 +240,8 @@ OperationMode operationMode = MODE_AUTO;  // Default to AUTO mode
 bool pumpState = false;
 float currentPressure = 0.0;
 float currentAmps = 0.0;
+float currentDepth1 = 0.0;
+float currentDepth2 = 0.0;
 
 FaultState faultState = FAULT_NONE;
 unsigned long overcurrentStartTime = 0;
@@ -466,7 +478,7 @@ void sendHADiscovery() {
   mqttClient.setTxPayloadSize(512);
 
   // --- Pressure Sensor ---
-  String pressureJson = "{\"name\":\"Water Pressure\",\"uniq_id\":\"opta_pump_pressure\",\"stat_t\":\"opta/pump/pressure\",\"unit_of_meas\":\"PSI\",\"dev_cla\":\"pressure\",\"stat_cla\":\"measurement\",\"icon\":\"mdi:gauge\",\"avty_t\":\"opta/pump/availability\",\"pl_avail\":\"online\",\"pl_not_avail\":\"offline\",\"dev\":{\"ids\":[\"opta_pump\"],\"name\":\"Water Pump Controller\",\"mf\":\"Arduino\",\"mdl\":\"Opta\"}}";
+  String pressureJson = "{\"name\":\"Water Pressure\",\"uniq_id\":\"opta_pump_pressure\",\"stat_t\":\"opta/pump/pressure\",\"unit_of_meas\":\"psi\",\"dev_cla\":\"pressure\",\"stat_cla\":\"measurement\",\"icon\":\"mdi:gauge\",\"avty_t\":\"opta/pump/availability\",\"pl_avail\":\"online\",\"pl_not_avail\":\"offline\",\"dev\":{\"ids\":[\"opta_pump\"],\"name\":\"Water Pump Controller\",\"mf\":\"Arduino\",\"mdl\":\"Opta\"}}";
   
   mqttClient.beginMessage("homeassistant/sensor/opta_pump_pressure/config", true, 1);
   mqttClient.print(pressureJson);
@@ -478,6 +490,22 @@ void sendHADiscovery() {
   
   mqttClient.beginMessage("homeassistant/sensor/opta_pump_amps/config", true, 1);
   mqttClient.print(ampsJson);
+  mqttClient.endMessage();
+  delay(100);
+
+  // --- Water Depth Sensor 1 ---
+  String depth1Json = "{\"name\":\"Water Depth 1\",\"uniq_id\":\"opta_pump_depth1\",\"stat_t\":\"opta/pump/depth1\",\"unit_of_meas\":\"m\",\"dev_cla\":\"distance\",\"stat_cla\":\"measurement\",\"icon\":\"mdi:waves\",\"avty_t\":\"opta/pump/availability\",\"pl_avail\":\"online\",\"pl_not_avail\":\"offline\",\"dev\":{\"ids\":[\"opta_pump\"],\"name\":\"Water Pump Controller\",\"mf\":\"Arduino\",\"mdl\":\"Opta\"}}";
+  
+  mqttClient.beginMessage("homeassistant/sensor/opta_pump_depth1/config", true, 1);
+  mqttClient.print(depth1Json);
+  mqttClient.endMessage();
+  delay(100);
+
+  // --- Water Depth Sensor 2 ---
+  String depth2Json = "{\"name\":\"Water Depth 2\",\"uniq_id\":\"opta_pump_depth2\",\"stat_t\":\"opta/pump/depth2\",\"unit_of_meas\":\"m\",\"dev_cla\":\"distance\",\"stat_cla\":\"measurement\",\"icon\":\"mdi:waves\",\"avty_t\":\"opta/pump/availability\",\"pl_avail\":\"online\",\"pl_not_avail\":\"offline\",\"dev\":{\"ids\":[\"opta_pump\"],\"name\":\"Water Pump Controller\",\"mf\":\"Arduino\",\"mdl\":\"Opta\"}}";
+  
+  mqttClient.beginMessage("homeassistant/sensor/opta_pump_depth2/config", true, 1);
+  mqttClient.print(depth2Json);
   mqttClient.endMessage();
   delay(100);
 
@@ -521,12 +549,21 @@ void sendHADiscovery() {
 void readSensors() {
   const int rawPressure = analogRead(PRESSURE_PIN);
   const int rawAmps = analogRead(AMP_PIN);
+  const int rawDepth1 = analogRead(DEPTH_PIN_1);
+  const int rawDepth2 = analogRead(DEPTH_PIN_2);
 
   const float voltagePressure = (rawPressure * 10.0) / 4095.0;
   const float voltageAmps = (rawAmps * 10.0) / 4095.0;
+  const float voltageDepth1 = (rawDepth1 * 10.0) / 4095.0;
+  const float voltageDepth2 = (rawDepth2 * 10.0) / 4095.0;
 
   currentPressure = constrain(mapFloat(voltagePressure, 0.0, 10.0, PRESSURE_MIN, PRESSURE_MAX), PRESSURE_MIN, PRESSURE_MAX);
   currentAmps = constrain(mapFloat(voltageAmps, 0.0, 10.0, AMP_MIN, AMP_MAX), AMP_MIN, AMP_MAX);
+  
+  // 4-20mA sensors: 4mA = 2V (0m), 20mA = 10V (2m)
+  // Map 2V-10V to 0-2m depth
+  currentDepth1 = constrain(mapFloat(voltageDepth1, 2.0, 10.0, DEPTH_MIN, DEPTH_MAX), DEPTH_MIN, DEPTH_MAX);
+  currentDepth2 = constrain(mapFloat(voltageDepth2, 2.0, 10.0, DEPTH_MIN, DEPTH_MAX), DEPTH_MIN, DEPTH_MAX);
 }
 
 inline float mapFloat(float x, float inMin, float inMax, float outMin, float outMax) {
@@ -803,7 +840,11 @@ void publishData() {
   Serial.print(currentPressure, 1);
   Serial.print(F(" PSI | A: "));
   Serial.print(currentAmps, 2);
-  Serial.print(F(" | Mode: "));
+  Serial.print(F(" | D1: "));
+  Serial.print(currentDepth1, 2);
+  Serial.print(F(" m | D2: "));
+  Serial.print(currentDepth2, 2);
+  Serial.print(F(" m | Mode: "));
   Serial.print(getModeString(operationMode));
   Serial.print(F(" | Pump: "));
   Serial.print(pumpState ? F("ON") : F("OFF"));
@@ -821,6 +862,14 @@ void publishData() {
 
   mqttClient.beginMessage(topicAmps);
   mqttClient.print(currentAmps, 2);
+  mqttClient.endMessage();
+
+  mqttClient.beginMessage(topicDepth1);
+  mqttClient.print(currentDepth1, 2);
+  mqttClient.endMessage();
+
+  mqttClient.beginMessage(topicDepth2);
+  mqttClient.print(currentDepth2, 2);
   mqttClient.endMessage();
 }
 
